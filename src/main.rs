@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"]
 use iced::widget::{button, column, container, pick_list, progress_bar, row, text};
 use iced::{Alignment, Application, Color, Command, Element, Length, Settings, Theme};
 use std::sync::Arc;

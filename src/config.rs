@@ -55,7 +55,7 @@ impl Default for Config {
         Config {
             eos_ip: "127.0.0.1".to_string(),
             eos_port: 8000,
-            listen_port: 9000,
+            listen_port: 8001,
             fader_bank_size: 10,
             mappings,
         }
