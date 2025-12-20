@@ -1,8 +1,9 @@
-use iced::{
-    alignment::Alignment, executor, theme, Application, Color, Command, Element, Length, Subscription,
-    Settings,
-};
+#![windows_subsystem = "windows"]
 use iced::widget::{button, column, container, pick_list, row, text, text_input};
+use iced::{
+    alignment::Alignment, executor, theme, Application, Color, Command, Element, Length, Settings,
+    Subscription,
+};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -184,7 +185,12 @@ impl Application for EosBridge {
                 Message::OutPortSelected
             )
             .placeholder("Select MIDI Out"),
-            button(if self.is_running { "Stop Bridge" } else { "Start Bridge" }).on_press(Message::ToggleBridge)
+            button(if self.is_running {
+                "Stop Bridge"
+            } else {
+                "Start Bridge"
+            })
+            .on_press(Message::ToggleBridge)
         ]
         .spacing(10)
         .padding(10);
@@ -232,9 +238,11 @@ impl Application for EosBridge {
 
     fn subscription(&self) -> Subscription<Message> {
         if self.is_running {
-            if let (Some(in_name), Some(out_name)) = (self.selected_in.clone(), self.selected_out.clone())
+            if let (Some(in_name), Some(out_name)) =
+                (self.selected_in.clone(), self.selected_out.clone())
             {
-                return bridge_subscription(in_name, out_name, self.config.clone()).map(Message::EventOccurred);
+                return bridge_subscription(in_name, out_name, self.config.clone())
+                    .map(Message::EventOccurred);
             }
         }
         Subscription::none()
