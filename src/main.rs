@@ -282,7 +282,7 @@ impl Application for EosBridge {
 
         let cfg_column = container(
             column![
-                text("EOS Configuration").size(18),
+                text("EOS Configuration").style(EOS_GOLD),
                 row![
                     text("EOS IP:").width(Length::FillPortion(1)),
                     text_input("127.0.0.1", &self.eos_ip_value)
