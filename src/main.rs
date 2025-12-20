@@ -1,11 +1,8 @@
 #![windows_subsystem = "windows"]
-use iced::widget::{button, column, container, pick_list, row, text, text_input};
-use iced::{
-    alignment::Alignment, executor, theme, Application, Color, Command, Element, Length, Settings,
-    Subscription,
-};
+use iced::widget::{button, column, container, pick_list, progress_bar, row, text, text_input};
+use iced::{Alignment, Application, Color, Command, Element, Length, Settings, Theme};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod config;
 mod midi_osc_logic;
@@ -22,7 +19,7 @@ const EOS_TEXT: Color = Color::from_rgb(0.9, 0.9, 0.9);
 pub fn main() -> iced::Result {
     EosBridge::run(Settings {
         window: iced::window::Settings {
-            size: iced::Size::new(900.0, 600.0),
+            size: iced::Size::new(900.0, 900.0),
             ..Default::default()
         },
         ..Settings::default()
@@ -65,9 +62,9 @@ enum Message {
 }
 
 impl Application for EosBridge {
-    type Executor = executor::Default;
+    type Executor = iced::executor::Default;
     type Message = Message;
-    type Theme = theme::Theme;
+    type Theme = Theme;
     type Flags = ();
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
@@ -169,82 +166,205 @@ impl Application for EosBridge {
         Command::none()
     }
 
-    fn view(&self) -> Element<Message> {
-        let ports_column = column![
-            text("MIDI Input:"),
-            pick_list(
-                self.in_ports.clone(),
-                self.selected_in.clone(),
-                Message::InPortSelected
+    fn subscription(&self) -> iced::Subscription<Message> {
+        if self.is_running {
+            bridge_subscription(
+                self.selected_in.clone().unwrap(),
+                self.selected_out.clone().unwrap(),
+                self.config.clone(),
             )
-            .placeholder("Select MIDI In"),
-            text("MIDI Output:"),
-            pick_list(
-                self.out_ports.clone(),
-                self.selected_out.clone(),
-                Message::OutPortSelected
-            )
-            .placeholder("Select MIDI Out"),
-            button(if self.is_running {
-                "Stop Bridge"
-            } else {
-                "Start Bridge"
-            })
-            .on_press(Message::ToggleBridge)
-        ]
-        .spacing(10)
-        .padding(10);
-
-        let cfg_column = column![
-            text("EOS Configuration").size(18),
-            row![
-                text("EOS IP:").width(Length::FillPortion(1)),
-                text_input("127.0.0.1", &self.eos_ip_value)
-                    .width(Length::FillPortion(2))
-                    .on_input(Message::EosIpChanged)
-            ]
-            .align_items(Alignment::Center)
-            .spacing(8),
-            row![
-                text("EOS Port:").width(Length::FillPortion(1)),
-                text_input("8000", &self.eos_port_value)
-                    .width(Length::FillPortion(1))
-                    .on_input(Message::EosPortChanged)
-            ]
-            .align_items(Alignment::Center)
-            .spacing(8),
-            row![
-                text("Listen Port:").width(Length::FillPortion(1)),
-                text_input("8001", &self.listen_port_value)
-                    .width(Length::FillPortion(1))
-                    .on_input(Message::ListenPortChanged)
-            ]
-            .align_items(Alignment::Center)
-            .spacing(8),
-            button("Save Configuration").on_press(Message::SaveConfig)
-        ]
-        .spacing(10)
-        .padding(10);
-
-        let content = row![ports_column, cfg_column].spacing(20).padding(10);
-
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x()
-            .center_y()
-            .into()
+            .map(Message::EventOccurred)
+        } else {
+            iced::Subscription::none()
+        }
     }
 
-    fn subscription(&self) -> Subscription<Message> {
-        if self.is_running {
-            if let (Some(in_name), Some(out_name)) =
-                (self.selected_in.clone(), self.selected_out.clone())
-            {
-                return bridge_subscription(in_name, out_name, self.config.clone())
-                    .map(Message::EventOccurred);
+    fn view(&self) -> Element<'_, Message> {
+        let is_connected = self
+            .last_heartbeat
+            .map_or(false, |t| t.elapsed() < Duration::from_secs(5));
+
+        let status_color = if self.is_running {
+            if is_connected {
+                EOS_GOLD
+            } else {
+                EOS_AMBER
             }
-        }
-        Subscription::none()
+        } else {
+            Color::from_rgb(0.3, 0.3, 0.3)
+        };
+
+        let header = container(
+            row![
+                text("EOS MIDI BRIDGE").size(24).style(EOS_GOLD),
+                row![
+                    container(column![])
+                        .width(12)
+                        .height(12)
+                        .style(move |_: &Theme| {
+                            container::Appearance {
+                                background: Some(status_color.into()),
+                                border: iced::Border {
+                                    radius: 6.0.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }
+                        }),
+                    text(if !self.is_running {
+                        "OFFLINE"
+                    } else if is_connected {
+                        "CONNECTED"
+                    } else {
+                        "WAITING FOR EOS..."
+                    })
+                    .size(14)
+                    .style(status_color)
+                ]
+                .spacing(8)
+                .align_items(Alignment::Center)
+            ]
+            .spacing(20)
+            .align_items(Alignment::Center),
+        )
+        .padding(20);
+
+        let setup_box = container(
+            column![
+                text("Hardware Configuration").style(EOS_GOLD),
+                row![
+                    column![
+                        text("MIDI IN (iCon)").size(12),
+                        pick_list(
+                            self.in_ports.as_slice(),
+                            self.selected_in.as_ref(),
+                            Message::InPortSelected
+                        )
+                        .width(300)
+                    ]
+                    .spacing(5),
+                    column![
+                        text("MIDI OUT (iCon)").size(12),
+                        pick_list(
+                            self.out_ports.as_slice(),
+                            self.selected_out.as_ref(),
+                            Message::OutPortSelected
+                        )
+                        .width(300)
+                    ]
+                    .spacing(5),
+                ]
+                .spacing(20),
+                button(
+                    text(if self.is_running {
+                        "DISCONNECT"
+                    } else {
+                        "CONNECT BRIDGE"
+                    })
+                    .width(Length::Fill)
+                    .horizontal_alignment(iced::alignment::Horizontal::Center)
+                )
+                .on_press(Message::ToggleBridge)
+                .padding(10)
+            ]
+            .spacing(15),
+        )
+        .padding(20)
+        .style(move |_: &Theme| container::Appearance {
+            background: Some(EOS_SURFACE.into()),
+            border: iced::Border {
+                width: 1.0,
+                color: Color::BLACK,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        });
+
+        let cfg_column = container(
+            column![
+                text("EOS Configuration").size(18),
+                row![
+                    text("EOS IP:").width(Length::FillPortion(1)),
+                    text_input("127.0.0.1", &self.eos_ip_value)
+                        .width(Length::FillPortion(2))
+                        .on_input(Message::EosIpChanged)
+                ]
+                .align_items(Alignment::Center)
+                .spacing(8),
+                row![
+                    text("EOS Port:").width(Length::FillPortion(1)),
+                    text_input("8000", &self.eos_port_value)
+                        .width(Length::FillPortion(1))
+                        .on_input(Message::EosPortChanged)
+                ]
+                .align_items(Alignment::Center)
+                .spacing(8),
+                row![
+                    text("Listen Port:").width(Length::FillPortion(1)),
+                    text_input("8001", &self.listen_port_value)
+                        .width(Length::FillPortion(1))
+                        .on_input(Message::ListenPortChanged)
+                ]
+                .align_items(Alignment::Center)
+                .spacing(8),
+                button("Save Configuration").on_press(Message::SaveConfig)
+            ]
+            .spacing(10),
+        )
+        .padding(10)
+        .style(move |_: &Theme| container::Appearance {
+            background: Some(EOS_SURFACE.into()),
+            border: iced::Border {
+                width: 1.0,
+                color: Color::BLACK,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        });
+
+        let fader_bank = row(self
+            .fader_levels
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, &lvl)| {
+                column![
+                    container(
+                        text(&self.fader_labels[i])
+                            .size(11)
+                            .horizontal_alignment(iced::alignment::Horizontal::Center)
+                    )
+                    .width(70)
+                    .padding(5)
+                    .style(|_: &Theme| container::Appearance {
+                        background: Some(Color::BLACK.into()),
+                        ..Default::default()
+                    }),
+                    container(progress_bar(0.0..=1.0, lvl))
+                        .height(180)
+                        .width(45),
+                    text(format!("{:.0}%", lvl * 100.0))
+                        .size(12)
+                        .style(EOS_GOLD),
+                ]
+                .align_items(Alignment::Center)
+                .spacing(8)
+                .into()
+            }))
+        .spacing(10);
+
+        container(
+            column![header, setup_box, cfg_column, fader_bank]
+                .spacing(30)
+                .align_items(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_: &Theme| container::Appearance {
+            background: Some(EOS_BG.into()),
+            text_color: Some(EOS_TEXT),
+            ..Default::default()
+        })
+        .into()
     }
 }
