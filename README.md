@@ -30,7 +30,7 @@ A high-performance, asynchronous bridge connecting the **iCon Platform M+** (wit
 To enable communication, go to **Setup > System > Network > OSC** on your Eos console:
 
 1. **OSC RX Port**: `8000`
-2. **OSC TX Port**: `9000`
+2. **OSC TX Port**: `8001`
 3. **OSC TX IP Address**: The IP of the computer running this bridge.
 4. **OSC UDP**: Ensure "UDP" is selected.
 5. **OSC TX (Transmit)**: Set to **ON**.
@@ -71,4 +71,4 @@ By default, this app is pre-configured for:
 🧪 Troubleshooting  
 * No Labels? Ensure "OSC TX" is ON in Eos and the IP address is correct.  
 * Motors Fighting? Ensure your iCon is in MCP mode so the Touch Sensitivity notes are sent correctly.  
-* Windows Firewall: You must allow UDP traffic on ports 8000 and 9000 when prompted.  
+* Windows Firewall: You must allow UDP traffic on ports 8000 and 8001 when prompted.  

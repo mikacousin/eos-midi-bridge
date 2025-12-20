@@ -2,7 +2,7 @@ use iced::{
     alignment::Alignment, executor, theme, Application, Color, Command, Element, Length, Subscription,
     Settings,
 };
-use iced::widget::{button, column, container, pick_list, row, text, text_input, Column, Row};
+use iced::widget::{button, column, container, pick_list, row, text, text_input};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -51,8 +51,8 @@ struct EosBridge {
 
 #[derive(Debug, Clone)]
 enum Message {
-    InPortSelected(Option<String>),
-    OutPortSelected(Option<String>),
+    InPortSelected(String),
+    OutPortSelected(String),
     ToggleBridge,
     EventOccurred(BridgeEvent),
 
@@ -111,8 +111,8 @@ impl Application for EosBridge {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
-            Message::InPortSelected(opt) => self.selected_in = opt,
-            Message::OutPortSelected(opt) => self.selected_out = opt,
+            Message::InPortSelected(port) => self.selected_in = Some(port),
+            Message::OutPortSelected(port) => self.selected_out = Some(port),
             Message::ToggleBridge => {
                 if self.selected_in.is_some() && self.selected_out.is_some() {
                     self.is_running = !self.is_running;
@@ -136,7 +136,8 @@ impl Application for EosBridge {
             Message::EosPortChanged(s) => self.eos_port_value = s,
             Message::ListenPortChanged(s) => self.listen_port_value = s,
             Message::SaveConfig => {
-                let mut new_cfg = (*self.config).as_ref().clone();
+                // Clone the existing config and overwrite fields from UI values
+                let mut new_cfg = (*self.config).clone();
                 new_cfg.eos_ip = self.eos_ip_value.clone();
                 if let Ok(p) = self.eos_port_value.parse::<u16>() {
                     new_cfg.eos_port = p;
@@ -169,46 +170,48 @@ impl Application for EosBridge {
 
     fn view(&self) -> Element<Message> {
         let ports_column = column![
-            text("MIDI Input:").color(EOS_TEXT),
+            text("MIDI Input:"),
             pick_list(
                 self.in_ports.clone(),
                 self.selected_in.clone(),
                 Message::InPortSelected
             )
             .placeholder("Select MIDI In"),
-            text("MIDI Output:").color(EOS_TEXT),
+            text("MIDI Output:"),
             pick_list(
                 self.out_ports.clone(),
                 self.selected_out.clone(),
                 Message::OutPortSelected
             )
             .placeholder("Select MIDI Out"),
-            button(if self.is_running { "Stop Bridge" } else { "Start Bridge" })
-                .on_press(Message::ToggleBridge)
+            button(if self.is_running { "Stop Bridge" } else { "Start Bridge" }).on_press(Message::ToggleBridge)
         ]
         .spacing(10)
         .padding(10);
 
         let cfg_column = column![
-            text("EOS Configuration").size(18).color(EOS_GOLD),
+            text("EOS Configuration").size(18),
             row![
-                text("EOS IP:").width(Length::FillPortion(1)).color(EOS_TEXT),
-                text_input("127.0.0.1", &self.eos_ip_value, Message::EosIpChanged)
+                text("EOS IP:").width(Length::FillPortion(1)),
+                text_input("127.0.0.1", &self.eos_ip_value)
                     .width(Length::FillPortion(2))
+                    .on_input(Message::EosIpChanged)
             ]
             .align_items(Alignment::Center)
             .spacing(8),
             row![
-                text("EOS Port:").width(Length::FillPortion(1)).color(EOS_TEXT),
-                text_input("8000", &self.eos_port_value, Message::EosPortChanged)
+                text("EOS Port:").width(Length::FillPortion(1)),
+                text_input("8000", &self.eos_port_value)
                     .width(Length::FillPortion(1))
+                    .on_input(Message::EosPortChanged)
             ]
             .align_items(Alignment::Center)
             .spacing(8),
             row![
-                text("Listen Port:").width(Length::FillPortion(1)).color(EOS_TEXT),
-                text_input("8001", &self.listen_port_value, Message::ListenPortChanged)
+                text("Listen Port:").width(Length::FillPortion(1)),
+                text_input("8001", &self.listen_port_value)
                     .width(Length::FillPortion(1))
+                    .on_input(Message::ListenPortChanged)
             ]
             .align_items(Alignment::Center)
             .spacing(8),
