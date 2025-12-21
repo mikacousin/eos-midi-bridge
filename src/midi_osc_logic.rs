@@ -69,16 +69,25 @@ pub fn bridge_subscription(
             let hb_socket = send_socket.try_clone().unwrap();
             let hb_addr = eos_addr.clone();
             tokio::spawn(async move {
+                // Initial sync
+                let init_msg = OscMessage {
+                    addr: "/eos/fader/1/config/10".into(),
+                    args: vec![],
+                };
+                if let Ok(buf) = encoder::encode(&OscPacket::Message(init_msg)) {
+                    let _ = hb_socket.send_to(&buf, &hb_addr);
+                }
+
                 loop {
-                    // Sending this causes Eos to send back all current fader labels
-                    let msg = OscMessage {
-                        addr: "/eos/fader/1/config/10".into(),
-                        args: vec![],
+                    // Ping every 5 seconds to keep the UI "Green"
+                    sleep(Duration::from_secs(5)).await;
+                    let ping = OscMessage {
+                        addr: "/eos/ping".into(),
+                        args: vec![OscType::String("BridgeSync".into())],
                     };
-                    if let Ok(buf) = encoder::encode(&OscPacket::Message(msg)) {
+                    if let Ok(buf) = encoder::encode(&OscPacket::Message(ping)) {
                         let _ = hb_socket.send_to(&buf, &hb_addr);
                     }
-                    sleep(Duration::from_secs(25)).await;
                 }
             });
 
@@ -191,7 +200,11 @@ async fn process_packet(
 ) {
     match packet {
         OscPacket::Message(msg) => {
-            // 1. Handle Fader Labels
+            // Listen for Eos Ping Response or any "out" message
+            if msg.addr.starts_with("/eos/out/ping") || msg.addr.starts_with("/eos/out") {
+                let _ = output_channel.send(BridgeEvent::ConnectionHeartbeat).await;
+            }
+            // Handle Fader Labels
             if msg.addr.contains("/name") {
                 let parts: Vec<&str> = msg.addr.split('/').collect();
                 if let (Some(idx_str), Some(OscType::String(name))) =
@@ -205,7 +218,7 @@ async fn process_packet(
                     }
                 }
             }
-            // 2. Handle Motorized Fader Feedback
+            // Handle Motorized Fader Feedback
             else if let Some(m) = cfg
                 .mappings
                 .iter()
