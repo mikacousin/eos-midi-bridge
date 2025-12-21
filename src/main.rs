@@ -182,7 +182,7 @@ impl Application for EosBridge {
     fn view(&self) -> Element<'_, Message> {
         let is_connected = self
             .last_heartbeat
-            .map_or(false, |t| t.elapsed() < Duration::from_secs(5));
+            .map_or(false, |t| t.elapsed() < Duration::from_secs(7));
 
         let status_color = if self.is_running {
             if is_connected {
