@@ -10,6 +10,7 @@ use tokio::time::{sleep, Duration};
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum BridgeEvent {
+    None,
     Log(String),
     FaderUpdate(u8, f32),
     LabelUpdate(u8, String),
@@ -33,6 +34,19 @@ fn send_mcu_label(conn: &mut MidiOutputConnection, fader_idx: u8, label: &str) {
 
     sysex.extend_from_slice(truncated);
     sysex.push(0xF7);
+    let _ = conn.send(&sysex);
+}
+
+pub fn clear_mcu_display(conn: &mut midir::MidiOutputConnection) {
+    // Standard Mackie LCD Header (0x12 = LCD command)
+    let mut sysex = vec![0xF0, 0x00, 0x00, 0x66, 0x14, 0x12];
+    sysex.push(0x00); // Start at the first character
+
+    // 56 spaces to clear all 8 fader segments (8 faders * 7 chars)
+    let spaces = " ".repeat(56);
+    sysex.extend_from_slice(spaces.as_bytes());
+
+    sysex.push(0xF7); // End of Sysex
     let _ = conn.send(&sysex);
 }
 
@@ -223,6 +237,7 @@ async fn process_packet(
                             } else {
                                 name.clone()
                             };
+                            // Remove accents
                             let ascii_name = deunicode(&mcu_name);
                             send_mcu_label(midi_out, idx, &ascii_name);
                         }

@@ -1,6 +1,8 @@
 #![windows_subsystem = "windows"]
 use iced::widget::{button, column, container, pick_list, progress_bar, row, text, text_input};
-use iced::{Alignment, Application, Color, Command, Element, Length, Settings, Theme};
+use iced::{
+    window, Alignment, Application, Color, Command, Element, Event, Length, Settings, Theme,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -59,6 +61,7 @@ enum Message {
     ListenPortChanged(String),
     SaveConfig,
     SaveResult(Result<(), String>),
+    WindowClosed,
 }
 
 impl Application for EosBridge {
@@ -116,6 +119,26 @@ impl Application for EosBridge {
                     self.is_running = !self.is_running;
                 }
             }
+            Message::WindowClosed => {
+                // If we are currently connected, clear the hardware display
+                if let (Some(out_name), true) = (&self.selected_out, self.is_running) {
+                    let midi_out = midir::MidiOutput::new("Eos-Cleanup").unwrap();
+                    if let Some(port) = midi_out
+                        .ports()
+                        .iter()
+                        .find(|p| midi_out.port_name(p).unwrap_or_default() == *out_name)
+                    {
+                        if let Ok(mut conn) = midi_out.connect(port, "cleanup") {
+                            midi_osc_logic::clear_mcu_display(&mut conn);
+                            // Brief sleep to ensure the MIDI message is sent before the process dies
+                            std::thread::sleep(std::time::Duration::from_millis(1000));
+                        }
+                    }
+                }
+                // Explicity exit the process
+                return iced::window::close(iced::window::Id::MAIN);
+            }
+            Message::EventOccurred(BridgeEvent::None) => {}
             Message::EventOccurred(event) => match event {
                 BridgeEvent::ConnectionHeartbeat => self.last_heartbeat = Some(Instant::now()),
                 BridgeEvent::FaderUpdate(i, v) => {
@@ -167,16 +190,23 @@ impl Application for EosBridge {
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
+        let mut subs = vec![];
+
+        // Add the window close listener
+        subs.push(iced::event::listen().map(|event| match event {
+            Event::Window(_, window::Event::CloseRequested) => Message::WindowClosed,
+            _ => Message::EventOccurred(BridgeEvent::None),
+        }));
+
         if self.is_running {
-            bridge_subscription(
-                self.selected_in.clone().unwrap(),
-                self.selected_out.clone().unwrap(),
-                self.config.clone(),
-            )
-            .map(Message::EventOccurred)
-        } else {
-            iced::Subscription::none()
+            if let (Some(in_p), Some(out_p)) = (&self.selected_in, &self.selected_out) {
+                subs.push(
+                    bridge_subscription(in_p.clone(), out_p.clone(), self.config.clone())
+                        .map(Message::EventOccurred),
+                );
+            }
         }
+        iced::Subscription::batch(subs)
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -342,9 +372,15 @@ impl Application for EosBridge {
                             background: Some(Color::BLACK.into()),
                             ..Default::default()
                         }),
-                        container(progress_bar(0.0..=1.0, lvl))
-                            .height(180)
-                            .width(45),
+                        container(
+                            progress_bar(0.0..=1.0, lvl)
+                                .width(Length::Fixed(45.0))
+                                .height(Length::Fixed(180.0))
+                        )
+                        .width(70)
+                        .height(200)
+                        .center_x()
+                        .center_y(),
                         text(format!("{:.0}%", lvl * 100.0))
                             .size(12)
                             .style(EOS_GOLD),
