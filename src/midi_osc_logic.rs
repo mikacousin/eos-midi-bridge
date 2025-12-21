@@ -1,4 +1,5 @@
 use crate::config::{float_to_pitch_bend, Config, MidiEventType};
+use deunicode::deunicode;
 use iced::futures::SinkExt;
 use midir::{MidiInput, MidiOutput, MidiOutputConnection};
 use rosc::{decoder, encoder, OscMessage, OscPacket, OscType};
@@ -25,13 +26,12 @@ fn send_mcu_label(conn: &mut MidiOutputConnection, fader_idx: u8, label: &str) {
     let offset = (fader_idx.saturating_sub(1)) * 7;
     sysex.push(offset);
 
-    // Clean up Eos string (e.g., "Fader 1: Vox" -> "Vox")
-    let clean = label.split(':').last().unwrap_or(label).trim();
-    let display_text = format!("{: ^7}", clean); // Center in 7 spaces
+    // Format: Center-aligned within 7 characters
+    let display_text = format!("{: ^7}", label);
+    // Take exactly 7 bytes to avoid overlapping into the next fader's space
+    let truncated = &display_text.as_bytes()[..7.min(display_text.len())];
 
-    let bytes = display_text.as_bytes();
-    sysex.extend_from_slice(&bytes[0..7.min(bytes.len())]);
-
+    sysex.extend_from_slice(truncated);
     sysex.push(0xF7);
     let _ = conn.send(&sysex);
 }
@@ -208,13 +208,24 @@ async fn process_packet(
             if msg.addr.contains("/name") {
                 let parts: Vec<&str> = msg.addr.split('/').collect();
                 if let (Some(idx_str), Some(OscType::String(name))) =
-                    (parts.get(4), msg.args.get(0))
+                    (parts.get(5), msg.args.get(0))
                 {
                     if let Ok(idx) = idx_str.parse::<u8>() {
-                        let _ = output_channel
-                            .send(BridgeEvent::LabelUpdate(idx, name.clone()))
-                            .await;
-                        send_mcu_label(midi_out, idx, name);
+                        if idx >= 1 && idx <= 8 {
+                            // Send to UI
+                            let _ = output_channel
+                                .send(BridgeEvent::LabelUpdate(idx, name.clone()))
+                                .await;
+                            // Send to iCon D2 Display
+                            let words: Vec<&str> = name.split_whitespace().collect();
+                            let mcu_name = if words.len() > 2 {
+                                words[2..].join(" ")
+                            } else {
+                                name.clone()
+                            };
+                            let ascii_name = deunicode(&mcu_name);
+                            send_mcu_label(midi_out, idx, &ascii_name);
+                        }
                     }
                 }
             }
@@ -226,18 +237,23 @@ async fn process_packet(
             {
                 if let Some(OscType::Float(f)) = msg.args.get(0) {
                     let idx = m.data_number;
-                    // Only move the motor if the user isn't physically touching it
-                    let is_touched = if let Ok(t) = touched.lock() {
-                        t[idx as usize]
-                    } else {
-                        false
-                    };
+                    if idx >= 1 && idx <= 8 {
+                        // Only move the motor if the user isn't physically touching it
+                        let is_touched = if let Ok(t) = touched.lock() {
+                            t[idx as usize]
+                        } else {
+                            false
+                        };
 
-                    if !is_touched {
-                        let pb = float_to_pitch_bend(*f);
-                        let _ =
-                            midi_out.send(&[0xE0 | (idx - 1), (pb & 0x7F) as u8, (pb >> 7) as u8]);
-                        let _ = output_channel.send(BridgeEvent::FaderUpdate(idx, *f)).await;
+                        if !is_touched {
+                            let pb = float_to_pitch_bend(*f);
+                            let _ = midi_out.send(&[
+                                0xE0 | (idx - 1),
+                                (pb & 0x7F) as u8,
+                                (pb >> 7) as u8,
+                            ]);
+                            let _ = output_channel.send(BridgeEvent::FaderUpdate(idx, *f)).await;
+                        }
                     }
                 }
             }

@@ -43,8 +43,8 @@ struct EosBridge {
     // bridge state
     is_running: bool,
     last_heartbeat: Option<Instant>,
-    fader_levels: [f32; 11],
-    fader_labels: [String; 11],
+    fader_levels: [f32; 9],
+    fader_labels: [String; 9],
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +96,7 @@ impl Application for EosBridge {
                 selected_out: None,
                 is_running: false,
                 last_heartbeat: None,
-                fader_levels: [0.0; 11],
+                fader_levels: [0.0; 9],
                 fader_labels: std::array::from_fn(|_| String::from("...")),
             },
             Command::none(),
@@ -322,36 +322,38 @@ impl Application for EosBridge {
             ..Default::default()
         });
 
-        let fader_bank = row(self
-            .fader_levels
-            .iter()
-            .enumerate()
-            .skip(1)
-            .map(|(i, &lvl)| {
-                column![
-                    container(
-                        text(&self.fader_labels[i])
-                            .size(11)
-                            .horizontal_alignment(iced::alignment::Horizontal::Center)
-                    )
-                    .width(70)
-                    .padding(5)
-                    .style(|_: &Theme| container::Appearance {
-                        background: Some(Color::BLACK.into()),
-                        ..Default::default()
-                    }),
-                    container(progress_bar(0.0..=1.0, lvl))
-                        .height(180)
-                        .width(45),
-                    text(format!("{:.0}%", lvl * 100.0))
-                        .size(12)
-                        .style(EOS_GOLD),
-                ]
-                .align_items(Alignment::Center)
-                .spacing(8)
-                .into()
-            }))
-        .spacing(10);
+        let fader_bank =
+            row(self
+                .fader_levels
+                .iter()
+                .enumerate()
+                .skip(1)
+                .take(8)
+                .map(|(i, &lvl)| {
+                    column![
+                        container(
+                            text(&self.fader_labels[i])
+                                .size(11)
+                                .horizontal_alignment(iced::alignment::Horizontal::Center)
+                        )
+                        .width(70)
+                        .padding(5)
+                        .style(|_: &Theme| container::Appearance {
+                            background: Some(Color::BLACK.into()),
+                            ..Default::default()
+                        }),
+                        container(progress_bar(0.0..=1.0, lvl))
+                            .height(180)
+                            .width(45),
+                        text(format!("{:.0}%", lvl * 100.0))
+                            .size(12)
+                            .style(EOS_GOLD),
+                    ]
+                    .align_items(Alignment::Center)
+                    .spacing(8)
+                    .into()
+                }))
+            .spacing(10);
 
         container(
             column![header, setup_box, cfg_column, fader_bank]
