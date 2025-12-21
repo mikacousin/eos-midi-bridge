@@ -67,7 +67,8 @@ By default, this app is pre-configured for:
 * Faders 1-8: Eos Faders 1-8 (of current page).  
 * Fader 9 (Master): Eos Fader 9 (of current page).  
 * Bank < / >: Page Up / Page Down.  
-* Scribble Strips: Displays Eos Target Names.  
+* Scribble Strips: Displays Eos Target Names.
+  
 🧪 Troubleshooting  
 * No Labels? Ensure "OSC TX" is ON in Eos and the IP address is correct.  
 * Motors Fighting? Ensure your iCon is in MCP mode so the Touch Sensitivity notes are sent correctly.  
