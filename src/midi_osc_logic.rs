@@ -248,7 +248,7 @@ async fn process_packet(
             else if let Some(m) = cfg
                 .mappings
                 .iter()
-                .find(|map| msg.addr.starts_with(&map.osc_address))
+                .find(|map| msg.addr == map.osc_address)
             {
                 if let Some(OscType::Float(f)) = msg.args.get(0) {
                     let idx = m.data_number;
