@@ -92,15 +92,15 @@ impl Application for EosBridge {
                 eos_ip_value: cfg.eos_ip.clone(),
                 eos_port_value: cfg.eos_port.to_string(),
                 listen_port_value: cfg.listen_port.to_string(),
-                config: Arc::new(cfg),
                 in_ports,
                 out_ports,
-                selected_in: None,
-                selected_out: None,
+                selected_in: cfg.midi_in_name.clone(),
+                selected_out: cfg.midi_out_name.clone(),
                 is_running: false,
                 last_heartbeat: None,
                 fader_levels: [0.0; 9],
                 fader_labels: std::array::from_fn(|_| String::from("...")),
+                config: Arc::new(cfg),
             },
             Command::none(),
         )
@@ -166,6 +166,8 @@ impl Application for EosBridge {
                 if let Ok(lp) = self.listen_port_value.parse::<u16>() {
                     new_cfg.listen_port = lp;
                 }
+                new_cfg.midi_in_name = self.selected_in.clone();
+                new_cfg.midi_out_name = self.selected_out.clone();
 
                 let cfg_clone = new_cfg.clone();
                 return Command::perform(

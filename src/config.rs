@@ -20,6 +20,8 @@ pub struct Config {
     pub eos_ip: String,
     pub eos_port: u16,
     pub listen_port: u16,
+    pub midi_in_name: Option<String>,
+    pub midi_out_name: Option<String>,
     pub fader_bank_size: u8,
     pub mappings: Vec<MidiOscMapping>,
 }
@@ -65,6 +67,8 @@ impl Default for Config {
             eos_port: 8000,
             listen_port: 8001,
             fader_bank_size: 10,
+            midi_in_name: None,
+            midi_out_name: None,
             mappings,
         }
     }
