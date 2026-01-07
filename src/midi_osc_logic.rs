@@ -4,6 +4,7 @@ use iced::futures::SinkExt;
 use midir::{MidiInput, MidiOutput, MidiOutputConnection};
 use rosc::{decoder, encoder, OscMessage, OscPacket, OscType};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, Duration};
 
@@ -106,7 +107,7 @@ pub fn bridge_subscription(
             });
 
             // --- MIDI Input to OSC Out ---
-            let touched_faders = Arc::new(std::sync::Mutex::new([false; 13]));
+            let touched_faders = Arc::new(std::sync::Mutex::new([(false, Instant::now()); 13]));
             let touched_faders_cb = touched_faders.clone();
             let mut midi_tx = output.clone();
             let tx_sock = send_socket.try_clone().unwrap();
@@ -129,10 +130,17 @@ pub fn bridge_subscription(
                             let is_touch = status == 0x90 && msg[2] > 0;
                             if let Ok(mut touched) = touched_faders_cb.lock() {
                                 // Notes 104-111 are fader touches on Platform M+
-                                if note >= 104 && note <= 111 {
-                                    touched[(note - 103) as usize] = is_touch;
+                                let idx = if note >= 104 && note <= 111 {
+                                    (note - 103) as usize
                                 } else if note == 112 {
-                                    touched[9] = is_touch;
+                                    9
+                                } else {
+                                    0
+                                };
+
+                                if idx > 0 {
+                                    // Update both the boolean and the timestamp
+                                    touched[idx] = (is_touch, Instant::now());
                                 }
                             }
                         }
@@ -210,7 +218,7 @@ async fn process_packet(
     midi_out: &mut MidiOutputConnection,
     output_channel: &mut iced::futures::channel::mpsc::Sender<BridgeEvent>,
     cfg: &Arc<Config>,
-    touched: &Arc<std::sync::Mutex<[bool; 13]>>,
+    touched: &Arc<std::sync::Mutex<[(bool, Instant); 13]>>,
 ) {
     match packet {
         OscPacket::Message(msg) => {
@@ -245,17 +253,15 @@ async fn process_packet(
                 }
             }
             // Handle Motorized Fader Feedback
-            else if let Some(m) = cfg
-                .mappings
-                .iter()
-                .find(|map| msg.addr == map.osc_address)
-            {
+            else if let Some(m) = cfg.mappings.iter().find(|map| msg.addr == map.osc_address) {
                 if let Some(OscType::Float(f)) = msg.args.get(0) {
                     let idx = m.data_number;
                     if idx >= 1 && idx <= 8 {
                         // Only move the motor if the user isn't physically touching it
                         let is_touched = if let Ok(t) = touched.lock() {
-                            t[idx as usize]
+                            let (is_held, last_change) = t[idx as usize];
+                            // IGNORE if currently held OR if released less than 300ms ago
+                            is_held || last_change.elapsed() < Duration::from_millis(300)
                         } else {
                             false
                         };
