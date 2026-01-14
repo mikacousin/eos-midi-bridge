@@ -4,8 +4,8 @@ version="0.0.1"
 edition="2021"
 
 [dependencies]
-midir = "0.9"
-rosc = "0.10"
+midir = "0.10.3"
+rosc = "0.11.4"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 anyhow = "1.0"
