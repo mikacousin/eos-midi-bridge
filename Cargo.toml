@@ -1,5 +1,5 @@
 [package]
-name="Mackie2Eos"
+name="eos-midi-bridge"
 version="0.0.1"
 edition="2021"
 
