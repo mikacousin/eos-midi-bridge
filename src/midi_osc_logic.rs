@@ -162,10 +162,7 @@ pub fn bridge_subscription(
                 Ok(s) => s,
                 Err(e) => {
                     let _ = output
-                        .send(BridgeEvent::Log(format!(
-                            "❌ UDP Send Socket Error: {}",
-                            e
-                        )))
+                        .send(BridgeEvent::Log(format!("❌ UDP Send Socket Error: {}", e)))
                         .await;
                     loop {
                         sleep(Duration::from_secs(3600)).await;
@@ -250,10 +247,7 @@ pub fn bridge_subscription(
                 Ok(s) => s,
                 Err(e) => {
                     let _ = output
-                        .send(BridgeEvent::Log(format!(
-                            "❌ TX socket clone error: {}",
-                            e
-                        )))
+                        .send(BridgeEvent::Log(format!("❌ TX socket clone error: {}", e)))
                         .await;
                     loop {
                         sleep(Duration::from_secs(3600)).await;
@@ -262,6 +256,24 @@ pub fn bridge_subscription(
             };
             let tx_addr = eos_addr.clone();
             let cfg_midi = cfg.clone();
+
+            // --- OSC Rx Loop (Eos Feedback) ---
+            let out_conn = match midi_out.connect(&out_p, "write") {
+                Ok(conn) => conn,
+                Err(e) => {
+                    let _ = output
+                        .send(BridgeEvent::Log(format!(
+                            "❌ MIDI Output connection error: {}",
+                            e
+                        )))
+                        .await;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(3600)).await;
+                    }
+                }
+            };
+            let shared_midi_out = Arc::new(std::sync::Mutex::new(out_conn));
+            let midi_out_for_callback = shared_midi_out.clone();
 
             // --- MIDI Input to OSC Out ---
             let _conn_in = match midi_in.connect(
@@ -328,6 +340,9 @@ pub fn bridge_subscription(
                                 let val =
                                     ((msg[2] as u16) * 128 + (msg[1] as u16)) as f32 / 16383.0;
                                 args.push(OscType::Float(val));
+                                if let Ok(mut conn) = midi_out_for_callback.lock() {
+                                    let _ = conn.send(&[msg[0], msg[1], msg[2]]);
+                                };
                                 Some(val)
                             }
                             MidiEventType::ControlChange => {
@@ -389,26 +404,6 @@ pub fn bridge_subscription(
                 .send(BridgeEvent::Log("✅ MIDI→OSC Bridge active".to_string()))
                 .await;
 
-            // --- OSC Rx Loop (Eos Feedback) ---
-            let mut out_conn = match midi_out.connect(&out_p, "write") {
-                Ok(conn) => conn,
-                Err(e) => {
-                    let _ = output
-                        .send(BridgeEvent::Log(format!(
-                            "❌ MIDI Output connection error: {}",
-                            e
-                        )))
-                        .await;
-                    loop {
-                        tokio::time::sleep(Duration::from_secs(3600)).await;
-                    }
-                }
-            };
-
-            let _ = output
-                .send(BridgeEvent::Log("✅ OSC→MIDI Bridge active".to_string()))
-                .await;
-
             let mut buf = [0u8; 4096];
             loop {
                 match recv_socket.recv_from(&mut buf).await {
@@ -418,21 +413,26 @@ pub fn bridge_subscription(
                         // decode_udp is the standard for network-received OSC
                         match decoder::decode_udp(&buf[..len]) {
                             Ok((_, packet)) => {
-                                process_packet(
-                                    packet,
-                                    &mut out_conn,
-                                    &mut output,
-                                    &cfg,
-                                    &touched_faders,
-                                )
-                                .await;
+                                let mut midi_result = None;
+                                {
+                                    if let Ok(_guard) = shared_midi_out.lock() {
+                                        midi_result = Some(packet);
+                                    }
+                                }
+                                if let Some(p) = midi_result {
+                                    process_packet(
+                                        p,
+                                        shared_midi_out.clone(),
+                                        &mut output,
+                                        &cfg,
+                                        &touched_faders,
+                                    )
+                                    .await;
+                                }
                             }
                             Err(e) => {
                                 let _ = output
-                                    .send(BridgeEvent::Log(format!(
-                                        "⚠️ OSC Decoding Error: {}",
-                                        e
-                                    )))
+                                    .send(BridgeEvent::Log(format!("⚠️ OSC Decoding Error: {}", e)))
                                     .await;
                             }
                         }
@@ -452,7 +452,7 @@ pub fn bridge_subscription(
 #[async_recursion::async_recursion]
 async fn process_packet(
     packet: OscPacket,
-    midi_out: &mut MidiOutputConnection,
+    midi_out: Arc<std::sync::Mutex<MidiOutputConnection>>,
     output_channel: &mut iced::futures::channel::mpsc::Sender<BridgeEvent>,
     cfg: &Arc<Config>,
     touched: &Arc<std::sync::Mutex<[FaderState; 13]>>,
@@ -493,7 +493,11 @@ async fn process_packet(
                                     };
                                     // Remove accents
                                     let ascii_name = deunicode(&mcu_name);
-                                    send_mcu_label(midi_out, idx, &ascii_name);
+                                    {
+                                        if let Ok(mut conn) = midi_out.lock() {
+                                            send_mcu_label(&mut *conn, idx, &ascii_name);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -543,18 +547,26 @@ async fn process_packet(
                             let pb = float_to_pitch_bend(*f);
                             let midi_channel = idx - 1; // MIDI channels 0-8 for faders 1-9
 
-                            if let Err(e) = midi_out.send(&[
-                                0xE0 | midi_channel,
-                                (pb & 0x7F) as u8,
-                                (pb >> 7) as u8,
-                            ]) {
-                                let _ = output_channel
-                                    .send(BridgeEvent::Log(format!(
-                                        "⚠️ Fader motor error {}: {}",
-                                        idx, e
-                                    )))
-                                    .await;
-                            } else {
+                            let mut error_msg: Option<String> = None;
+                            let mut send_success = false;
+                            {
+                                if let Ok(mut midi_out_lock) = midi_out.lock() {
+                                    if let Err(e) = midi_out_lock.send(&[
+                                        0xE0 | midi_channel,
+                                        (pb & 0x7F) as u8,
+                                        (pb >> 7) as u8,
+                                    ]) {
+                                        error_msg =
+                                            Some(format!("⚠️ Fader motor error {}: {}", idx, e));
+                                    } else {
+                                        send_success = true;
+                                    }
+                                }
+                            }
+                            if let Some(log_msg) = error_msg {
+                                let _ = output_channel.send(BridgeEvent::Log(log_msg)).await;
+                            }
+                            if send_success {
                                 let _ =
                                     output_channel.send(BridgeEvent::FaderUpdate(idx, *f)).await;
                             }
@@ -573,7 +585,7 @@ async fn process_packet(
         }
         OscPacket::Bundle(bundle) => {
             for content in bundle.content {
-                process_packet(content, midi_out, output_channel, cfg, touched).await;
+                process_packet(content, midi_out.clone(), output_channel, cfg, touched).await;
             }
         }
     }
