@@ -1,6 +1,5 @@
 use log::{debug, error, info};
 use midir::{MidiInput, MidiOutput};
-use rosc::OscType;
 use std::io::{stdin, stdout, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,128 +7,11 @@ use tokio::sync::mpsc;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use eos_midi_bridge::*;
-
-pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
-    match event {
-        MackieEvent::MidiIn(msg) => {
-            if msg.len() < 3 {
-                return;
-            }
-            let (status, d1, d2) = (msg[0], msg[1], msg[2]);
-            let (msg_type, chan) = (status & 0xF0, status & 0x0F);
-
-            // Get the client without holding a lock on the whole struct
-            let client = {
-                let m = midi.lock().unwrap();
-                m.osc_client.clone()
-            };
-
-            match msg_type {
-                0x90 => {
-                    // d2 == 127 is Press, d2 == 0 is Release
-                    let is_pressed = d2 == 127;
-
-                    match d1 {
-                        94 => {
-                            // GO Button
-                            if is_pressed {
-                                let _ = client.send("/eos/user/1/key/go_0", vec![]).await;
-                                let mut m = midi.lock().unwrap();
-                                m.crossfade_state = CrossfadeState::Go;
-                                m.send_queue.enqueue(vec![0x90, 94, 127]); // LED On
-                                m.send_queue.enqueue(vec![0x90, 93, 0]); // Ensure GoBack LED Off
-                            }
-                        }
-                        93 => {
-                            // STOP / GoBack Button
-                            if is_pressed {
-                                let _ = client.send("/eos/user/1/key/stop", vec![]).await;
-                                // Turn LED ON immediately
-                                let mut m = midi.lock().unwrap();
-                                if m.crossfade_state == CrossfadeState::Go {
-                                    m.crossfade_state = CrossfadeState::Pause;
-                                    m.send_queue.enqueue(vec![0x90, 93, 127]);
-                                } else {
-                                    m.crossfade_state = CrossfadeState::GoBack;
-                                    m.send_queue.enqueue(vec![0x90, 93, 127]);
-                                    m.send_queue.enqueue(vec![0x90, 94, 0]);
-                                }
-                            }
-                        }
-                        46 | 47 if is_pressed => {
-                            // Page Up / Down
-                            let (new_page, display_duration) = {
-                                let mut m = midi.lock().unwrap();
-                                if d1 == 47 {
-                                    m.fader_page = if m.fader_page >= 99 {
-                                        1
-                                    } else {
-                                        m.fader_page + 1
-                                    };
-                                } else {
-                                    m.fader_page = if m.fader_page <= 1 {
-                                        99
-                                    } else {
-                                        m.fader_page - 1
-                                    };
-                                }
-                                m.last_page_change = time::Instant::now(); // Mark the start of the 1s window
-                                m.show_page_number(m.fader_page);
-                                (m.fader_page, m.page_display_time)
-                                // 2. MutexGuard 'm' is dropped here automatically at the end of the block
-                            };
-
-                            let client_clone = client.clone();
-
-                            // Spawn a timer task
-                            tokio::spawn(async move {
-                                // 1. Send the config to Eos immediately
-                                let _ = client_clone
-                                    .send(
-                                        &format!("/eos/user/1/fader/1/config/{}/10", new_page),
-                                        vec![],
-                                    )
-                                    .await;
-
-                                // 2. Wait for 1 second
-                                time::sleep(display_duration).await;
-
-                                // 3. Request fader names again to refresh the LCD and remove the Page message
-                                // Eos will respond with the names, which our OscServer handles by writing to both lines
-                                let _ = client_clone
-                                    .send(
-                                        &format!("/eos/user/1/fader/1/config/{}/10", new_page),
-                                        vec![],
-                                    )
-                                    .await;
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-                0xE0 => {
-                    // Calculate the pitch value
-                    let pitch = (((d1 as u16) | ((d2 as u16) << 7)) as i16) - 8192;
-                    let value = (pitch as f32 + 8192.0) / 16383.0;
-                    // Echo the value back to the controler immediately
-                    {
-                        let m = midi.lock().unwrap();
-                        m.enqueue_pitchwheel(chan, pitch);
-                    }
-                    // Send the OSC command to Eos
-                    let _ = client
-                        .send(
-                            &format!("/eos/user/1/fader/1/{}", chan + 1),
-                            vec![OscType::Float(value)],
-                        )
-                        .await;
-                }
-                _ => {}
-            }
-        }
-    }
-}
+use eos_midi_bridge::{
+    midi::{handle_event_logic, Midi},
+    osc::{OscClient, OscServer},
+    CrossfadeState, MackieEvent,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
