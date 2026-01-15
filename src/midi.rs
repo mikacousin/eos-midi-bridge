@@ -1,4 +1,4 @@
-use crate::{osc::OscClient, strip_accents, CrossfadeState, MackieEvent, OscType, Queue};
+use crate::{CrossfadeState, MackieEvent, OscType, Queue, osc::OscClient, strip_accents};
 use midir::MidiOutputConnection;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -154,14 +154,14 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                                 m.last_page_change = time::Instant::now(); // Mark the start of the 1s window
                                 m.show_page_number(m.fader_page);
                                 (m.fader_page, m.page_display_time)
-                                // 2. MutexGuard 'm' is dropped here automatically at the end of the block
+                                // MutexGuard 'm' is dropped here automatically at the end of the block
                             };
 
                             let client_clone = client.clone();
 
                             // Spawn a timer task
                             tokio::spawn(async move {
-                                // 1. Send the config to Eos immediately
+                                // Send the config to Eos immediately
                                 let _ = client_clone
                                     .send(
                                         &format!("/eos/user/1/fader/1/config/{}/10", new_page),
@@ -169,10 +169,10 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                                     )
                                     .await;
 
-                                // 2. Wait for 1 second
+                                // Wait for 1 second
                                 time::sleep(display_duration).await;
 
-                                // 3. Request fader names again to refresh the LCD and remove the Page message
+                                // Request fader names again to refresh the LCD and remove the Page message
                                 // Eos will respond with the names, which our OscServer handles by writing to both lines
                                 let _ = client_clone
                                     .send(
