@@ -1,6 +1,6 @@
 use log::{debug, error, info};
 use midir::{MidiInput, MidiOutput};
-use std::io::{stdin, stdout, Write};
+use std::io::{Write, stdin, stdout};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -8,9 +8,9 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use eos_midi_bridge::{
-    midi::{handle_event_logic, Midi},
-    osc::{OscClient, OscServer},
     CrossfadeState, MackieEvent,
+    midi::{Midi, handle_event_logic},
+    osc::{OscClient, OscServer},
 };
 
 #[tokio::main]
@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let cancel_token = CancellationToken::new();
 
-    // 1. MIDI Selection
+    // MIDI Selection
     let midi_in = MidiInput::new("Mackie In")?;
     let midi_out = MidiOutput::new("Mackie Out")?;
 
@@ -26,28 +26,52 @@ async fn main() -> anyhow::Result<()> {
     for (i, p) in in_ports.iter().enumerate() {
         println!("{}: {}", i, midi_in.port_name(p)?);
     }
-    print!("Select In: ");
-    stdout().flush()?;
-    let mut input = String::new();
-    stdin().read_line(&mut input)?;
-    let in_port = &in_ports[input.trim().parse::<usize>()?];
+
+    let in_port = loop {
+        print!("Select In: ");
+        stdout().flush()?;
+        let mut input = String::new();
+        stdin().read_line(&mut input)?;
+
+        if let Ok(idx) = input.trim().parse::<usize>() {
+            if idx < in_ports.len() {
+                break &in_ports[idx];
+            }
+        }
+        println!(
+            "Invalid index. Please choose a number between 0 and {}.",
+            in_ports.len() - 1
+        );
+    };
 
     let out_ports = midi_out.ports();
     for (i, p) in out_ports.iter().enumerate() {
         println!("{}: {}", i, midi_out.port_name(p)?);
     }
-    print!("Select Out: ");
-    stdout().flush()?;
-    let mut output = String::new();
-    stdin().read_line(&mut output)?;
-    let out_port = &out_ports[output.trim().parse::<usize>()?];
 
-    // 2. Init State & Channels
+    let out_port = loop {
+        print!("Select Out: ");
+        stdout().flush()?;
+        let mut output = String::new();
+        stdin().read_line(&mut output)?;
+
+        if let Ok(idx) = output.trim().parse::<usize>() {
+            if idx < out_ports.len() {
+                break &out_ports[idx];
+            }
+        }
+        println!(
+            "Invalid index. Please choose a number between 0 and {}.",
+            out_ports.len() - 1
+        );
+    };
+
+    // Init State & Channels
     let (tx, mut rx) = mpsc::channel::<MackieEvent>(100);
     let osc_client = OscClient::new("192.168.1.42", 8000).await?;
     let midi = Arc::new(Mutex::new(Midi::new(osc_client)));
 
-    // 3. Connect MIDI
+    // Connect MIDI
     let conn_out = midi_out
         .connect(out_port, "mackie-out-conn")
         .map_err(|e| anyhow::anyhow!("Out Error: {}", e))?;
@@ -73,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("In Error: {}", e))?;
 
-    // 4. Spawn Worker Tasks
+    // Spawn Worker Tasks
     let worker_midi = Arc::clone(&midi);
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
@@ -133,12 +157,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await?;
 
     info!("\nShutting down and resetting controller...");
-    // 1. Trigger the reset
+    // Trigger the reset
     {
         let mut m = midi.lock().unwrap();
         m.controller_reset();
 
-        // 2. Immediately flush the queue to the hardware
+        // Immediately flush the queue to the hardware
         // We do this manually here because the loop task may be cancelled
         // or shut down before it gets one last tick.
         while let Some(msg) = m.send_queue.dequeue() {
@@ -148,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 3. Cancel tokens and wait briefly for tasks to clean up
+    // Cancel tokens and wait briefly for tasks to clean up
     cancel_token.cancel();
     time::sleep(Duration::from_millis(200)).await;
     info!("Shutdown complete.");
