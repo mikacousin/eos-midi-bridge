@@ -8,7 +8,7 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use eos_midi_bridge::{
-    CrossfadeState, MackieEvent,
+    CrossfadeState, MackieEvent, config,
     midi::{Midi, handle_event_logic},
     osc::{OscClient, OscServer},
 };
@@ -16,6 +16,14 @@ use eos_midi_bridge::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
+
+    // Load persisted configuration
+    let cfg = config::load_config();
+    info!(
+        "Loaded Config: Eos IP: {}, Port: {}",
+        cfg.eos_ip, cfg.eos_osc_port
+    );
+
     let cancel_token = CancellationToken::new();
 
     // MIDI Selection
@@ -68,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Init State & Channels
     let (tx, mut rx) = mpsc::channel::<MackieEvent>(100);
-    let osc_client = OscClient::new("192.168.1.42", 8000).await?;
+    let osc_client = OscClient::new(&cfg.eos_ip, cfg.eos_osc_port).await?;
     let midi = Arc::new(Mutex::new(Midi::new(osc_client)));
 
     // Connect MIDI
@@ -147,7 +155,9 @@ async fn main() -> anyhow::Result<()> {
     let osc_server_midi = Arc::clone(&midi);
     let osc_server_token = cancel_token.clone();
     tokio::spawn(async move {
-        let server = OscServer { port: 8001 };
+        let server = OscServer {
+            port: cfg.bridge_listen_port,
+        };
         if let Err(e) = server.start(osc_server_midi, osc_server_token).await {
             error!("OSC Server Error : {}", e);
         }
