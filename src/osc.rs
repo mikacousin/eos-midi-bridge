@@ -1,4 +1,4 @@
-use crate::{midi::Midi, CrossfadeState};
+use crate::{CrossfadeState, midi::Midi};
 use deunicode::deunicode;
 use log::{debug, info};
 use rosc::{OscMessage, OscPacket, OscType};
@@ -154,7 +154,9 @@ impl OscServer {
                         .nth(1)
                         .and_then(|s| s.split_whitespace().next())
                     {
-                        if let Ok(new_cue_num) = cue_part.parse::<f32>() {
+                        let simplified_cue =
+                            cue_part.split('/').take(2).collect::<Vec<_>>().join(".");
+                        if let Ok(new_cue_num) = simplified_cue.parse::<f32>() {
                             let mut m = midi.lock().unwrap();
 
                             // Compare to know the direction if we were Inactive
