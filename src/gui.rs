@@ -114,9 +114,6 @@ impl eframe::App for BridgeApp {
                 }
             }
 
-            ui.add_space(10.0);
-            ui.label(&self.status_message);
-
             // Fader levels
             ui.separator();
             match self.midi.lock() {
@@ -183,6 +180,11 @@ impl eframe::App for BridgeApp {
                     ui.label("⚠ Unable to display fader levels");
                 }
             }
+
+            // Status message en bas de la fenêtre
+            ui.add_space(20.0);
+            ui.separator();
+            ui.label(&self.status_message);
         });
 
         // Request repaint at a reasonable rate (30 FPS) instead of constantly

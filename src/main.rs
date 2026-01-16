@@ -181,7 +181,10 @@ fn main() -> anyhow::Result<()> {
 
     // Launch the GUI
     let gui_midi = midi.clone();
-    let options = eframe::NativeOptions::default();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 500.0]),
+        ..Default::default()
+    };
     let gui_result = eframe::run_native(
         "Eos Mackie Bridge",
         options,
