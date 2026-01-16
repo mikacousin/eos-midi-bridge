@@ -48,3 +48,7 @@ impl<T> Queue<T> {
 pub fn strip_accents(text: &str) -> String {
     deunicode(text)
 }
+
+pub fn clean_midi_name(name: &str) -> String {
+    name.split(':').next().unwrap_or(name).trim().to_string()
+}

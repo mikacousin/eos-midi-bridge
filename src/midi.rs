@@ -16,6 +16,7 @@ pub struct Midi {
     pub current_cue: Option<f32>,
     pub fader_levels: [f32; 9],
     pub fader_names: [String; 9],
+    pub connection_status: String,
 }
 
 impl Midi {
@@ -31,6 +32,7 @@ impl Midi {
             current_cue: None,
             fader_levels: [0.0; 9],
             fader_names: Default::default(),
+            connection_status: "Disconnected".to_string(),
         }
     }
 

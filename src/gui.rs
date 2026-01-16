@@ -213,7 +213,13 @@ impl eframe::App for BridgeApp {
             // Status message en bas de la fenêtre
             ui.add_space(20.0);
             ui.separator();
-            ui.label(&self.status_message);
+            ui.horizontal(|ui| {
+                if let Ok(m) = self.midi.lock() {
+                    ui.label(egui::RichText::new(&m.connection_status).strong());
+                    ui.label("|");
+                }
+                ui.label(&self.status_message);
+            });
         });
 
         // Request repaint at a reasonable rate (30 FPS) instead of constantly

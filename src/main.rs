@@ -3,7 +3,7 @@ mod gui;
 
 use anyhow::Context;
 use eos_midi_bridge::{
-    CrossfadeState, MackieEvent, SystemCommand, config,
+    CrossfadeState, MackieEvent, SystemCommand, clean_midi_name, config,
     midi::{Midi, handle_event_logic},
     osc::{OscClient, OscServer},
 };
@@ -106,7 +106,12 @@ fn main() -> anyhow::Result<()> {
                             .await;
                     });
                 }
-                Err(e) => error!("Failed to create OSC client: {}", e),
+                Err(e) => {
+                    error!("Failed to create OSC client: {}", e);
+                    if let Ok(mut m) = supervision_midi.lock() {
+                        m.connection_status = format!("❌ OSC Error: {}", e);
+                    }
+                }
             }
 
             // Start MIDI Pump
@@ -152,8 +157,21 @@ fn main() -> anyhow::Result<()> {
                     Ok(conn) => {
                         _midi_input_conn = Some(conn);
                         info!("MIDI connected to {}/{}", in_name, out_name);
+                        if let Ok(mut m) = supervision_midi.lock() {
+                            m.connection_status =
+                                format!("✓ Connected to {} / {}", in_name, out_name);
+                        }
                     }
-                    Err(e) => error!("Failed to connect MIDI: {}", e),
+                    Err(e) => {
+                        error!("Failed to connect MIDI: {}", e);
+                        if let Ok(mut m) = supervision_midi.lock() {
+                            m.connection_status = format!("❌ MIDI Error: {}", e);
+                        }
+                    }
+                }
+            } else {
+                if let Ok(mut m) = supervision_midi.lock() {
+                    m.connection_status = "⚠ MIDI Ports not selected".to_string();
                 }
             }
 
@@ -176,12 +194,22 @@ fn main() -> anyhow::Result<()> {
     let in_ports: Vec<String> = midi_in_scanner
         .ports()
         .iter()
-        .filter_map(|p| midi_in_scanner.port_name(p).ok())
+        .filter_map(|p| {
+            midi_in_scanner
+                .port_name(p)
+                .ok()
+                .map(|name| clean_midi_name(&name))
+        })
         .collect();
     let out_ports: Vec<String> = midi_out_scanner
         .ports()
         .iter()
-        .filter_map(|p| midi_out_scanner.port_name(p).ok())
+        .filter_map(|p| {
+            midi_out_scanner
+                .port_name(p)
+                .ok()
+                .map(|name| clean_midi_name(&name))
+        })
         .collect();
 
     // Launch the GUI
@@ -232,13 +260,27 @@ fn setup_midi(
     let in_port = midi_in
         .ports()
         .into_iter()
-        .find(|p| midi_in.port_name(p).ok().as_deref() == Some(in_name))
+        .find(|p| {
+            midi_in
+                .port_name(p)
+                .ok()
+                .map(|name| clean_midi_name(&name))
+                .as_deref()
+                == Some(in_name)
+        })
         .context(format!("MIDI Input '{}' not found", in_name))?;
 
     let out_port = midi_out
         .ports()
         .into_iter()
-        .find(|p| midi_out.port_name(p).ok().as_deref() == Some(out_name))
+        .find(|p| {
+            midi_out
+                .port_name(p)
+                .ok()
+                .map(|name| clean_midi_name(&name))
+                .as_deref()
+                == Some(out_name)
+        })
         .context(format!("MIDI Output '{}' not found", out_name))?;
 
     let conn_in = midi_in
