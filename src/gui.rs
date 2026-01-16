@@ -58,35 +58,49 @@ impl eframe::App for BridgeApp {
                     ui.end_row();
 
                     ui.label("MIDI Input:");
-                    let mut selected_in = self
-                        .config_edit
-                        .midi_in_name
-                        .clone()
-                        .unwrap_or_else(|| "None".to_string());
+                    let mut selected_in = self.config_edit.midi_in_name.clone();
+
+                    // Check if the saved port is still available
+                    if let Some(ref name) = selected_in {
+                        if !self.available_in_ports.contains(name) {
+                            selected_in = None;
+                        }
+                    }
+
+                    let display_in = selected_in.as_deref().unwrap_or("None");
+
                     egui::ComboBox::from_id_salt("midi_in_select")
-                        .selected_text(&selected_in)
+                        .selected_text(display_in)
                         .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut selected_in, None, "None");
                             for port in &self.available_in_ports {
-                                ui.selectable_value(&mut selected_in, port.clone(), port);
+                                ui.selectable_value(&mut selected_in, Some(port.clone()), port);
                             }
                         });
-                    self.config_edit.midi_in_name = Some(selected_in);
+                    self.config_edit.midi_in_name = selected_in;
                     ui.end_row();
 
                     ui.label("MIDI Output:");
-                    let mut selected_out = self
-                        .config_edit
-                        .midi_out_name
-                        .clone()
-                        .unwrap_or_else(|| "None".to_string());
+                    let mut selected_out = self.config_edit.midi_out_name.clone();
+
+                    // Check if the saved port is still available
+                    if let Some(ref name) = selected_out {
+                        if !self.available_out_ports.contains(name) {
+                            selected_out = None;
+                        }
+                    }
+
+                    let display_out = selected_out.as_deref().unwrap_or("None");
+
                     egui::ComboBox::from_id_salt("midi_out_select")
-                        .selected_text(&selected_out)
+                        .selected_text(display_out)
                         .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut selected_out, None, "None");
                             for port in &self.available_out_ports {
-                                ui.selectable_value(&mut selected_out, port.clone(), port);
+                                ui.selectable_value(&mut selected_out, Some(port.clone()), port);
                             }
                         });
-                    self.config_edit.midi_out_name = Some(selected_out);
+                    self.config_edit.midi_out_name = selected_out;
                     ui.end_row();
                 });
 
