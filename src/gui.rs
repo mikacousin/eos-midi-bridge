@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 pub struct BridgeApp {
     pub midi: Arc<Mutex<Midi>>,
     pub config_edit: BridgeConfig,
+    pub last_applied_config: BridgeConfig,
     pub status_message: String,
     pub available_in_ports: Vec<String>,
     pub available_out_ports: Vec<String>,
@@ -24,6 +25,7 @@ impl BridgeApp {
     ) -> Self {
         Self {
             midi,
+            last_applied_config: config.clone(),
             config_edit: config,
             status_message: "Ready".to_string(),
             available_in_ports: in_ports,
@@ -106,22 +108,29 @@ impl eframe::App for BridgeApp {
 
             ui.add_space(20.0);
 
-            if ui.button("💾 Save Configuration").clicked() {
+            if ui.button("💾 Save to Disk").clicked() {
                 match store_config(&self.config_edit) {
                     Ok(_) => {
-                        self.status_message = "✓ Configuration applied immediately!".to_string();
-                        // Send reconfiguration command to the background supervisor
-                        if let Err(e) = self
-                            .tx_system
-                            .blocking_send(SystemCommand::Reconfigure(self.config_edit.clone()))
-                        {
-                            error!("Failed to send reconfiguration command: {}", e);
-                            self.status_message = "❌ Error: Failed to apply changes".to_string();
-                        }
+                        self.status_message = "✓ Configuration saved to disk".to_string();
                     }
                     Err(e) => {
                         error!("Failed to save configuration: {}", e);
                         self.status_message = format!("❌ Error: {}", e);
+                    }
+                }
+            }
+
+            // Auto-apply changes if config has changed and is valid
+            if self.config_edit != self.last_applied_config {
+                if self.config_edit.validate().is_ok() {
+                    if let Err(e) = self
+                        .tx_system
+                        .blocking_send(SystemCommand::Reconfigure(self.config_edit.clone()))
+                    {
+                        error!("Failed to send live reconfiguration command: {}", e);
+                    } else {
+                        self.last_applied_config = self.config_edit.clone();
+                        self.status_message = "Settings applied".to_string();
                     }
                 }
             }
