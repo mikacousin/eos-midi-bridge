@@ -1,8 +1,9 @@
 use crate::config::{BridgeConfig, store_config};
 use eframe::egui;
-use eos_midi_bridge::midi::Midi;
+use eos_midi_bridge::{SystemCommand, midi::Midi};
 use log::{error, warn};
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 pub struct BridgeApp {
     pub midi: Arc<Mutex<Midi>>,
@@ -10,6 +11,7 @@ pub struct BridgeApp {
     pub status_message: String,
     pub available_in_ports: Vec<String>,
     pub available_out_ports: Vec<String>,
+    pub tx_system: mpsc::Sender<SystemCommand>,
 }
 
 impl BridgeApp {
@@ -18,6 +20,7 @@ impl BridgeApp {
         config: BridgeConfig,
         in_ports: Vec<String>,
         out_ports: Vec<String>,
+        tx_system: mpsc::Sender<SystemCommand>,
     ) -> Self {
         Self {
             midi,
@@ -25,6 +28,7 @@ impl BridgeApp {
             status_message: "Ready".to_string(),
             available_in_ports: in_ports,
             available_out_ports: out_ports,
+            tx_system,
         }
     }
 }
@@ -91,8 +95,15 @@ impl eframe::App for BridgeApp {
             if ui.button("💾 Save Configuration").clicked() {
                 match store_config(&self.config_edit) {
                     Ok(_) => {
-                        self.status_message =
-                            "✓ Config saved! Restart required to apply.".to_string();
+                        self.status_message = "✓ Configuration applied immediately!".to_string();
+                        // Send reconfiguration command to the background supervisor
+                        if let Err(e) = self
+                            .tx_system
+                            .blocking_send(SystemCommand::Reconfigure(self.config_edit.clone()))
+                        {
+                            error!("Failed to send reconfiguration command: {}", e);
+                            self.status_message = "❌ Error: Failed to apply changes".to_string();
+                        }
                     }
                     Err(e) => {
                         error!("Failed to save configuration: {}", e);

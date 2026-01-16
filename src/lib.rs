@@ -14,6 +14,10 @@ pub enum MackieEvent {
     MidiIn(Vec<u8>),
 }
 
+pub enum SystemCommand {
+    Reconfigure(crate::config::BridgeConfig),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CrossfadeState {
     Inactive,
