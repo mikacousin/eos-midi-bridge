@@ -17,6 +17,8 @@ pub struct Midi {
     pub fader_levels: [f32; 9],
     pub fader_names: [String; 9],
     pub connection_status: String,
+    pub available_in_ports: Vec<String>,
+    pub available_out_ports: Vec<String>,
 }
 
 impl Midi {
@@ -33,6 +35,8 @@ impl Midi {
             fader_levels: [0.0; 9],
             fader_names: Default::default(),
             connection_status: "Disconnected".to_string(),
+            available_in_ports: Vec::new(),
+            available_out_ports: Vec::new(),
         }
     }
 

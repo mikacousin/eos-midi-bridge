@@ -185,32 +185,37 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Scan available MIDI ports for the GUI
-    let midi_in_scanner =
-        MidiInput::new("Scanner In").context("Failed to create MIDI input scanner")?;
-    let midi_out_scanner =
-        MidiOutput::new("Scanner Out").context("Failed to create MIDI output scanner")?;
+    // MIDI Monitoring Task: Periodically scan ports and check connectivity
+    let monitor_midi = Arc::clone(&midi);
+    rt.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
 
-    let in_ports: Vec<String> = midi_in_scanner
-        .ports()
-        .iter()
-        .filter_map(|p| {
-            midi_in_scanner
-                .port_name(p)
-                .ok()
-                .map(|name| clean_midi_name(&name))
-        })
-        .collect();
-    let out_ports: Vec<String> = midi_out_scanner
-        .ports()
-        .iter()
-        .filter_map(|p| {
-            midi_out_scanner
-                .port_name(p)
-                .ok()
-                .map(|name| clean_midi_name(&name))
-        })
-        .collect();
+            let in_ports = match MidiInput::new("Monitor In") {
+                Ok(scanner) => scanner
+                    .ports()
+                    .iter()
+                    .filter_map(|p| scanner.port_name(p).ok().map(|name| clean_midi_name(&name)))
+                    .collect::<Vec<String>>(),
+                Err(_) => Vec::new(),
+            };
+
+            let out_ports = match MidiOutput::new("Monitor Out") {
+                Ok(scanner) => scanner
+                    .ports()
+                    .iter()
+                    .filter_map(|p| scanner.port_name(p).ok().map(|name| clean_midi_name(&name)))
+                    .collect::<Vec<String>>(),
+                Err(_) => Vec::new(),
+            };
+
+            if let Ok(mut m) = monitor_midi.lock() {
+                m.available_in_ports = in_ports;
+                m.available_out_ports = out_ports;
+            }
+        }
+    });
 
     // Launch the GUI
     let options = eframe::NativeOptions {
@@ -222,15 +227,7 @@ fn main() -> anyhow::Result<()> {
     let gui_result = eframe::run_native(
         "Eos Mackie Bridge",
         options,
-        Box::new(move |_cc| {
-            Ok(Box::new(gui::BridgeApp::new(
-                app_midi,
-                cfg,
-                in_ports,
-                out_ports,
-                app_tx_system,
-            )))
-        }),
+        Box::new(move |_cc| Ok(Box::new(gui::BridgeApp::new(app_midi, cfg, app_tx_system)))),
     );
 
     // Shutdown and Reset
