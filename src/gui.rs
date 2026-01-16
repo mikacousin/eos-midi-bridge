@@ -1,6 +1,7 @@
 use crate::config::{BridgeConfig, store_config};
 use eframe::egui;
 use eos_midi_bridge::midi::Midi;
+use log::{error, warn};
 use std::sync::{Arc, Mutex};
 
 pub struct BridgeApp {
@@ -90,16 +91,27 @@ impl eframe::App for BridgeApp {
             if ui.button("💾 Save Configuration").clicked() {
                 match store_config(&self.config_edit) {
                     Ok(_) => {
-                        self.status_message = "Config saved! Restart required to apply.".to_string()
+                        self.status_message =
+                            "✓ Config saved! Restart required to apply.".to_string();
                     }
-                    Err(e) => self.status_message = format!("Error: {}", e),
+                    Err(e) => {
+                        error!("Failed to save configuration: {}", e);
+                        self.status_message = format!("❌ Error: {}", e);
+                    }
                 }
             }
 
             ui.separator();
+
             // Live Status from the Arc<Mutex<Midi>>
-            if let Ok(m) = self.midi.lock() {
-                ui.label(format!("Active Cue: {:.2}", m.current_cue));
+            match self.midi.lock() {
+                Ok(m) => {
+                    ui.label(format!("Active Cue: {:.2}", m.current_cue));
+                }
+                Err(e) => {
+                    warn!("Failed to lock MIDI state for display: {}", e);
+                    ui.label("⚠ Unable to read current cue");
+                }
             }
 
             ui.add_space(10.0);
@@ -107,65 +119,73 @@ impl eframe::App for BridgeApp {
 
             // Fader levels
             ui.separator();
-            if let Ok(m) = self.midi.lock() {
-                ui.heading(format!("Fader Page: {}", m.fader_page));
-            } else {
-                ui.heading("Fader Levels");
-            }
-            ui.add_space(5.0);
-            if let Ok(m) = self.midi.lock() {
-                ui.horizontal_top(|ui| {
-                    for i in 0..9 {
-                        let column_width = 75.0;
-                        ui.allocate_ui(egui::vec2(column_width, 200.0), |ui| {
-                            ui.vertical_centered(|ui| {
-                                let name = &m.fader_names[i];
-                                let label = if !name.is_empty() {
-                                    name.as_str()
-                                } else {
-                                    "..."
-                                };
-                                ui.add_sized(
-                                    [column_width, 18.0],
-                                    egui::Label::new(egui::RichText::new(label).small().strong())
+            match self.midi.lock() {
+                Ok(m) => {
+                    ui.heading(format!("Fader Page: {}", m.fader_page));
+                    ui.add_space(5.0);
+
+                    ui.horizontal_top(|ui| {
+                        for i in 0..9 {
+                            let column_width = 75.0;
+                            ui.allocate_ui(egui::vec2(column_width, 200.0), |ui| {
+                                ui.vertical_centered(|ui| {
+                                    let name = m
+                                        .fader_names
+                                        .get(i)
+                                        .map(|s| s.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or("...");
+
+                                    ui.add_sized(
+                                        [column_width, 18.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(name).small().strong(),
+                                        )
                                         .truncate(),
-                                );
+                                    );
 
-                                ui.add_space(4.0);
+                                    ui.add_space(4.0);
 
-                                // Create a vertical slider
-                                let mut val = m.fader_levels[i];
-                                let slider = egui::Slider::new(&mut val, 0.0..=1.0)
-                                    .vertical()
-                                    .show_value(false);
+                                    // Create a vertical slider
+                                    let val = m.fader_levels.get(i).copied().unwrap_or(0.0);
+                                    let mut val_mut = val;
+                                    let slider = egui::Slider::new(&mut val_mut, 0.0..=1.0)
+                                        .vertical()
+                                        .show_value(false);
 
-                                // Add the slider but disable interaction (Sense::hover means no clicks.drag)
-                                ui.add_enabled_ui(false, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let slider_width = 22.0;
-                                        let padding = (column_width - slider_width) / 2.0;
-                                        ui.add_space(padding);
-                                        ui.add_sized([slider_width, 160.0], slider);
+                                    // Add the slider but disable interaction
+                                    ui.add_enabled_ui(false, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let slider_width = 22.0;
+                                            let padding = (column_width - slider_width) / 2.0;
+                                            ui.add_space(padding);
+                                            ui.add_sized([slider_width, 160.0], slider);
+                                        });
                                     });
+
+                                    ui.add_space(4.0);
+
+                                    // Show percentage text below
+                                    ui.add_sized(
+                                        [column_width, 15.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("{:.0}%", val * 100.0))
+                                                .small(),
+                                        ),
+                                    );
                                 });
-
-                                ui.add_space(4.0);
-
-                                // Show percentage text below
-                                ui.add_sized(
-                                    [column_width, 15.0],
-                                    egui::Label::new(
-                                        egui::RichText::new(format!("{:.0}%", val * 100.0)).small(),
-                                    ),
-                                );
                             });
-                        });
-                    }
-                });
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!("Failed to lock MIDI state for fader display: {}", e);
+                    ui.label("⚠ Unable to display fader levels");
+                }
             }
         });
 
-        // Request constant repaints to keep the Cue display live
-        ctx.request_repaint();
+        // Request repaint at a reasonable rate (30 FPS) instead of constantly
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
 }

@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -21,10 +22,51 @@ impl Default for BridgeConfig {
     }
 }
 
-pub fn load_config() -> BridgeConfig {
-    confy::load("eos-midi-bridge", None).unwrap_or_default()
+impl BridgeConfig {
+    // Validate the configuration values
+    pub fn validate(&self) -> Result<()> {
+        if self.eos_ip.is_empty() {
+            anyhow::bail!("Eos IP address cannot be empty");
+        }
+
+        // Basic IP validation
+        if !self.eos_ip.contains('.') && self.eos_ip != "localhost" {
+            anyhow::bail!("Invalid Eos IP address format");
+        }
+
+        if self.eos_osc_port == 0 {
+            anyhow::bail!("Eos OSC port cannot be 0");
+        }
+
+        if self.bridge_listen_port == 0 {
+            anyhow::bail!("Bridge listen port cannot be 0");
+        }
+
+        if self.eos_osc_port == self.bridge_listen_port {
+            anyhow::bail!("Eos OSC port and bridge listen port cannot be the same");
+        }
+
+        Ok(())
+    }
 }
 
-pub fn store_config(config: &BridgeConfig) -> Result<(), confy::ConfyError> {
+pub fn load_config() -> Result<BridgeConfig> {
+    let config: BridgeConfig =
+        confy::load("eos-midi-bridge", None).context("Failed to load configuration from disk")?;
+
+    config
+        .validate()
+        .context("Configuration validation failed")?;
+
+    Ok(config)
+}
+
+pub fn store_config(config: &BridgeConfig) -> Result<()> {
+    config
+        .validate()
+        .context("Cannot save invalid configuration")?;
     confy::store("eos-midi-bridge", None, config)
+        .context("Failed to write configuration to disk")?;
+
+    Ok(())
 }
