@@ -170,15 +170,20 @@ impl OscServer {
                             if m.crossfade_state == CrossfadeState::Inactive
                                 || m.crossfade_state == CrossfadeState::Pause
                             {
-                                if new_cue_num > m.current_cue {
+                                if let Some(old_cue) = m.current_cue {
+                                    if new_cue_num > old_cue {
+                                        m.crossfade_state = CrossfadeState::Go;
+                                    } else if new_cue_num < old_cue {
+                                        m.crossfade_state = CrossfadeState::GoBack;
+                                    }
+                                } else {
+                                    // First cue received, assume Go
                                     m.crossfade_state = CrossfadeState::Go;
-                                } else if new_cue_num < m.current_cue {
-                                    m.crossfade_state = CrossfadeState::GoBack;
                                 }
                             }
 
-                            m.current_cue = new_cue_num;
-                            debug!("Current Cue updated to: {}", m.current_cue);
+                            m.current_cue = Some(new_cue_num);
+                            debug!("Current Cue updated to: {:?}", m.current_cue);
                         }
                     }
                 }

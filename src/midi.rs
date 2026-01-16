@@ -13,7 +13,7 @@ pub struct Midi {
     pub last_page_change: time::Instant,
     pub page_display_time: Duration,
     pub crossfade_state: CrossfadeState,
-    pub current_cue: f32,
+    pub current_cue: Option<f32>,
     pub fader_levels: [f32; 9],
     pub fader_names: [String; 9],
 }
@@ -28,7 +28,7 @@ impl Midi {
             last_page_change: time::Instant::now() - Duration::from_secs(2),
             page_display_time: Duration::from_millis(500),
             crossfade_state: CrossfadeState::Inactive,
-            current_cue: 0.0,
+            current_cue: None,
             fader_levels: [0.0; 9],
             fader_names: Default::default(),
         }

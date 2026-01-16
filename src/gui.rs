@@ -117,7 +117,11 @@ impl eframe::App for BridgeApp {
             // Live Status from the Arc<Mutex<Midi>>
             match self.midi.lock() {
                 Ok(m) => {
-                    ui.label(format!("Active Cue: {:.2}", m.current_cue));
+                    if let Some(cue) = m.current_cue {
+                        ui.label(format!("Active Cue: {:.2}", cue));
+                    } else {
+                        ui.label("Active Cue: --");
+                    }
                 }
                 Err(e) => {
                     warn!("Failed to lock MIDI state for display: {}", e);
