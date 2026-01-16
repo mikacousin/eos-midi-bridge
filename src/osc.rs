@@ -1,5 +1,4 @@
-use crate::{CrossfadeState, midi::Midi};
-use deunicode::deunicode;
+use crate::{CrossfadeState, midi::Midi, strip_accents};
 use log::{debug, info};
 use rosc::{OscMessage, OscPacket, OscType};
 use std::sync::{Arc, Mutex};
@@ -78,6 +77,22 @@ impl OscServer {
 
             // Handle Fader Labels: /eos/out/fader/1/{index}/name
             if msg.addr.starts_with("/eos/out/fader/1/") && msg.addr.ends_with("/name") {
+                if let (Some(f_str), Some(OscType::String(text))) = (parts.get(5), msg.args.first())
+                {
+                    if let Ok(f_num) = f_str.parse::<usize>() {
+                        if f_num <= 9 {
+                            let mut m = midi.lock().unwrap();
+                            let mut text = text.clone();
+                            if text.starts_with("S") {
+                                let split: Vec<&str> = text.split_whitespace().collect();
+                                if split.len() > 2 {
+                                    text = split[2..].join(" ");
+                                }
+                            }
+                            m.fader_names[f_num - 1] = text.clone();
+                        }
+                    }
+                }
                 // Check if we should ignore this update to keep the Page number visible
                 {
                     let m = midi.lock().unwrap();
@@ -89,21 +104,12 @@ impl OscServer {
                         return;
                     }
                 }
-                if let (Some(f_str), Some(OscType::String(text))) = (parts.get(5), msg.args.first())
-                {
+                if let Some(f_str) = parts.get(5) {
                     if let Ok(f_num) = f_str.parse::<usize>() {
                         if f_num <= 8 {
-                            let m = midi.lock().unwrap();
-                            let mut text = text.clone();
-                            if text.starts_with("S") {
-                                let split: Vec<&str> = text.split_whitespace().collect();
-                                if split.len() > 2 {
-                                    text = split[2..].join(" ");
-                                }
-                            }
-
                             // Transliterate to ASCII first
-                            let clean_text = strip_accents(&text);
+                            let m = midi.lock().unwrap();
+                            let clean_text = strip_accents(&m.fader_names[f_num - 1]);
 
                             // Split text into two lines (Top 7 chars, Bottom 7 chars)
                             let line0: String = clean_text.chars().take(6).collect();
@@ -120,10 +126,11 @@ impl OscServer {
                 // For "/eos/fader/1/5", parts are ["", "eos", "fader", "1", "5"] -> index 4
                 if let (Some(f_str), Some(OscType::Float(val))) = (parts.get(4), msg.args.first()) {
                     if let Ok(f_num) = f_str.parse::<usize>() {
-                        if f_num <= 8 {
+                        if f_num <= 9 {
                             let pitch = (val * 16383.0).round() as i16 - 8192;
-                            let m = midi.lock().unwrap();
+                            let mut m = midi.lock().unwrap();
                             m.enqueue_pitchwheel((f_num - 1) as u8, pitch);
+                            m.fader_levels[f_num - 1] = *val;
                         }
                     }
                 }
@@ -205,8 +212,4 @@ impl OscServer {
             }
         }
     }
-}
-
-pub fn strip_accents(text: &str) -> String {
-    deunicode(text)
 }

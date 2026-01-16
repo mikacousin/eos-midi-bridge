@@ -1,5 +1,6 @@
-use crate::{CrossfadeState, MackieEvent, OscType, Queue, osc::OscClient, strip_accents};
+use crate::{CrossfadeState, MackieEvent, Queue, osc::OscClient, strip_accents};
 use midir::MidiOutputConnection;
+use rosc::OscType;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time;
@@ -13,6 +14,8 @@ pub struct Midi {
     pub page_display_time: Duration,
     pub crossfade_state: CrossfadeState,
     pub current_cue: f32,
+    pub fader_levels: [f32; 9],
+    pub fader_names: [String; 9],
 }
 
 impl Midi {
@@ -26,6 +29,8 @@ impl Midi {
             page_display_time: Duration::from_millis(500),
             crossfade_state: CrossfadeState::Inactive,
             current_cue: 0.0,
+            fader_levels: [0.0; 9],
+            fader_names: Default::default(),
         }
     }
 
@@ -191,8 +196,11 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                     let value = (pitch as f32 + 8192.0) / 16383.0;
                     // Echo the value back to the controler immediately
                     {
-                        let m = midi.lock().unwrap();
+                        let mut m = midi.lock().unwrap();
                         m.enqueue_pitchwheel(chan, pitch);
+                        if chan < 9 {
+                            m.fader_levels[chan as usize] = value;
+                        }
                     }
                     // Send the OSC command to Eos
                     let _ = client

@@ -96,14 +96,72 @@ impl eframe::App for BridgeApp {
                 }
             }
 
-            ui.add_space(10.0);
-            ui.label(&self.status_message);
-
             ui.separator();
             // Live Status from the Arc<Mutex<Midi>>
             if let Ok(m) = self.midi.lock() {
                 ui.label(format!("Active Cue: {:.2}", m.current_cue));
-                ui.label(format!("Fader Page: {}", m.fader_page));
+            }
+
+            ui.add_space(10.0);
+            ui.label(&self.status_message);
+
+            // Fader levels
+            ui.separator();
+            if let Ok(m) = self.midi.lock() {
+                ui.heading(format!("Fader Page: {}", m.fader_page));
+            } else {
+                ui.heading("Fader Levels");
+            }
+            ui.add_space(5.0);
+            if let Ok(m) = self.midi.lock() {
+                ui.horizontal_top(|ui| {
+                    for i in 0..9 {
+                        let column_width = 75.0;
+                        ui.allocate_ui(egui::vec2(column_width, 200.0), |ui| {
+                            ui.vertical_centered(|ui| {
+                                let name = &m.fader_names[i];
+                                let label = if !name.is_empty() {
+                                    name.as_str()
+                                } else {
+                                    "..."
+                                };
+                                ui.add_sized(
+                                    [column_width, 18.0],
+                                    egui::Label::new(egui::RichText::new(label).small().strong())
+                                        .truncate(),
+                                );
+
+                                ui.add_space(4.0);
+
+                                // Create a vertical slider
+                                let mut val = m.fader_levels[i];
+                                let slider = egui::Slider::new(&mut val, 0.0..=1.0)
+                                    .vertical()
+                                    .show_value(false);
+
+                                // Add the slider but disable interaction (Sense::hover means no clicks.drag)
+                                ui.add_enabled_ui(false, |ui| {
+                                    ui.horizontal(|ui| {
+                                        let slider_width = 22.0;
+                                        let padding = (column_width - slider_width) / 2.0;
+                                        ui.add_space(padding);
+                                        ui.add_sized([slider_width, 160.0], slider);
+                                    });
+                                });
+
+                                ui.add_space(4.0);
+
+                                // Show percentage text below
+                                ui.add_sized(
+                                    [column_width, 15.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("{:.0}%", val * 100.0)).small(),
+                                    ),
+                                );
+                            });
+                        });
+                    }
+                });
             }
         });
 
