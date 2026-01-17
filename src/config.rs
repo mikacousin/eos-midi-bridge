@@ -8,6 +8,7 @@ pub struct BridgeConfig {
     pub bridge_listen_port: u16,
     pub midi_in_name: Option<String>,
     pub midi_out_name: Option<String>,
+    pub controller_profile: String,
 }
 
 impl Default for BridgeConfig {
@@ -18,6 +19,7 @@ impl Default for BridgeConfig {
             bridge_listen_port: 8001,
             midi_in_name: None,
             midi_out_name: None,
+            controller_profile: "profiles/icon_platform_m_plus.json".to_string(),
         }
     }
 }

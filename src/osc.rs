@@ -80,41 +80,48 @@ impl OscServer {
                 if let (Some(f_str), Some(OscType::String(text))) = (parts.get(5), msg.args.first())
                 {
                     if let Ok(f_num) = f_str.parse::<usize>() {
-                        if f_num <= 9 {
+                        {
                             let mut m = midi.lock().unwrap();
-                            let mut text = text.clone();
-                            if text.starts_with("S") {
-                                let split: Vec<&str> = text.split_whitespace().collect();
-                                if split.len() > 2 {
-                                    text = split[2..].join(" ");
+                            let eos_bank_size = m.profile.eos_bank_size;
+                            if f_num <= eos_bank_size {
+                                let mut text = text.clone();
+                                if text.starts_with("S") {
+                                    let split: Vec<&str> = text.split_whitespace().collect();
+                                    if split.len() > 2 {
+                                        text = split[2..].join(" ");
+                                    }
                                 }
+                                m.fader_names[f_num - 1] = text;
                             }
-                            m.fader_names[f_num - 1] = text.clone();
                         }
-                    }
-                }
-                // Check if we should ignore this update to keep the Page number visible
-                {
-                    let m = midi.lock().unwrap();
-                    // Ignore updates for slightly less than the total display time to ensure refresh works
-                    let lockout = m
-                        .page_display_time
-                        .saturating_sub(Duration::from_millis(100));
-                    if m.last_page_change.elapsed() < lockout {
-                        return;
-                    }
-                }
-                if let Some(f_str) = parts.get(5) {
-                    if let Ok(f_num) = f_str.parse::<usize>() {
-                        if f_num <= 8 {
-                            // Transliterate to ASCII first
+
+                        // Check if we should ignore this update to keep the Page number visible
+                        {
                             let m = midi.lock().unwrap();
-                            let clean_text = strip_accents(&m.fader_names[f_num - 1]);
+                            let lockout = m
+                                .page_display_time
+                                .saturating_sub(Duration::from_millis(100));
+                            if m.last_page_change.elapsed() < lockout {
+                                return;
+                            }
+                        }
 
-                            // Split text into two lines (Top 7 chars, Bottom 7 chars)
-                            let line0: String = clean_text.chars().take(6).collect();
-                            let line1: String = clean_text.chars().skip(6).take(6).collect();
+                        // Send to LCD strip if physically available
+                        let (lcd_segments, clean_text) = {
+                            let m = midi.lock().unwrap();
+                            let lcd_seg =
+                                m.profile.display.line_length / m.profile.display.strip_width;
+                            let t = m.fader_names[f_num - 1].clone();
+                            (lcd_seg, t)
+                        };
 
+                        if f_num <= lcd_segments {
+                            let clean_text_stripped = strip_accents(&clean_text);
+                            let line0: String = clean_text_stripped.chars().take(6).collect();
+                            let line1: String =
+                                clean_text_stripped.chars().skip(6).take(6).collect();
+
+                            let m = midi.lock().unwrap();
                             m.send_to_strip(&line0, 0, f_num - 1);
                             m.send_to_strip(&line1, 1, f_num - 1);
                         }
@@ -126,10 +133,14 @@ impl OscServer {
                 // For "/eos/fader/1/5", parts are ["", "eos", "fader", "1", "5"] -> index 4
                 if let (Some(f_str), Some(OscType::Float(val))) = (parts.get(4), msg.args.first()) {
                     if let Ok(f_num) = f_str.parse::<usize>() {
-                        if f_num <= 9 {
+                        let mut m = midi.lock().unwrap();
+                        let eos_bank_size = m.profile.eos_bank_size;
+                        if f_num <= eos_bank_size {
                             let pitch = (val * 16383.0).round() as i16 - 8192;
-                            let mut m = midi.lock().unwrap();
-                            m.enqueue_pitchwheel((f_num - 1) as u8, pitch);
+                            // Only update physical pitchwheel if it exists
+                            if f_num <= m.profile.fader_count {
+                                m.enqueue_pitchwheel((f_num - 1) as u8, pitch);
+                            }
                             m.fader_levels[f_num - 1] = *val;
                         }
                     }
@@ -141,17 +152,18 @@ impl OscServer {
                     || m.crossfade_state == CrossfadeState::GoBack
                 {
                     m.crossfade_state = CrossfadeState::Pause;
-                    m.send_queue.enqueue(vec![0x90, 93, 127]); // Ensure Stop LED is Solid On
-                    debug!("Eos Stop event detected: State set to Pause");
+                    let stop_note = m.profile.buttons.stop_note;
+                    m.send_queue.enqueue(vec![0x90, stop_note, 127]); // Ensure Stop LED is Solid On
                 }
             } else if msg.addr == "/eos/out/event/cue/1/0/resume" {
                 let mut m = midi.lock().unwrap();
                 if m.crossfade_state == CrossfadeState::Pause {
                     // Resume the 'Go' state so the Play button stops flashing and stays solid
                     m.crossfade_state = CrossfadeState::Go;
-                    m.send_queue.enqueue(vec![0x90, 93, 0]); // Stop LED Off
-                    m.send_queue.enqueue(vec![0x90, 94, 127]); // Go LED Solid
-                    debug!("Eos Resume: State set to Go");
+                    let stop_note = m.profile.buttons.stop_note;
+                    let go_note = m.profile.buttons.go_note;
+                    m.send_queue.enqueue(vec![0x90, stop_note, 0]); // Stop LED Off
+                    m.send_queue.enqueue(vec![0x90, go_note, 127]); // Go LED Solid
                 }
             } else if msg.addr == "/eos/out/active/cue/text" {
                 if let Some(OscType::String(text)) = msg.args.first() {
@@ -204,10 +216,19 @@ impl OscServer {
                         let m = midi.lock().unwrap();
                         m.osc_client.clone()
                     };
+                    let midi_clone = Arc::clone(midi);
                     tokio::spawn(async move {
-                        // User requested /eos/usr/1/fader/1/config/10
-                        // Standard Eos is /eos/user/1/fader/1/config/10
-                        let _ = client.send("/eos/user/1/fader/1/config/10", vec![]).await;
+                        // Request fader config based on profile's fader count
+                        let eos_bank_size = {
+                            let m = midi_clone.lock().unwrap();
+                            m.profile.eos_bank_size
+                        };
+                        let _ = client
+                            .send(
+                                &format!("/eos/user/1/fader/1/config/{}", eos_bank_size),
+                                vec![],
+                            )
+                            .await;
                         let _ = client
                             .send("/eos/subscribe", vec![rosc::OscType::Int(1)])
                             .await;
@@ -217,27 +238,34 @@ impl OscServer {
                 if let Some(OscType::Float(progress)) = msg.args.get(0) {
                     let mut m = midi.lock().unwrap();
 
-                    if *progress >= 1.0 {
-                        m.crossfade_state = CrossfadeState::Inactive;
-                        m.send_queue.enqueue(vec![0x90, 94, 0]); // Go LED Off
-                        m.send_queue.enqueue(vec![0x90, 93, 0]); // Stop LED Off
-                    } else if *progress > 0.0 {
-                        // Apply LED status based on the state determined by text parsing or MIDI press
+                    if *progress < 1.0 {
                         match m.crossfade_state {
                             CrossfadeState::Go => {
-                                m.send_queue.enqueue(vec![0x90, 94, 127]);
-                                m.send_queue.enqueue(vec![0x90, 93, 0]);
+                                let go_note = m.profile.buttons.go_note;
+                                let stop_note = m.profile.buttons.stop_note;
+                                m.send_queue.enqueue(vec![0x90, go_note, 127]);
+                                m.send_queue.enqueue(vec![0x90, stop_note, 0]);
                             }
                             CrossfadeState::GoBack => {
-                                m.send_queue.enqueue(vec![0x90, 93, 127]);
-                                m.send_queue.enqueue(vec![0x90, 94, 0]);
+                                let go_note = m.profile.buttons.go_note;
+                                let stop_note = m.profile.buttons.stop_note;
+                                m.send_queue.enqueue(vec![0x90, stop_note, 127]);
+                                m.send_queue.enqueue(vec![0x90, go_note, 0]);
                             }
                             CrossfadeState::Pause => {
-                                m.send_queue.enqueue(vec![0x90, 93, 127]);
-                                m.send_queue.enqueue(vec![0x90, 94, 0]);
+                                let go_note = m.profile.buttons.go_note;
+                                let stop_note = m.profile.buttons.stop_note;
+                                m.send_queue.enqueue(vec![0x90, stop_note, 127]);
+                                m.send_queue.enqueue(vec![0x90, go_note, 0]);
                             }
                             CrossfadeState::Inactive => {}
                         }
+                    } else {
+                        let go_note = m.profile.buttons.go_note;
+                        let stop_note = m.profile.buttons.stop_note;
+                        m.crossfade_state = CrossfadeState::Inactive;
+                        m.send_queue.enqueue(vec![0x90, go_note, 0]); // Go LED Off
+                        m.send_queue.enqueue(vec![0x90, stop_note, 0]); // Stop LED Off
                     }
                 }
             }

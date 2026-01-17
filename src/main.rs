@@ -3,7 +3,7 @@ mod gui;
 
 use anyhow::Context;
 use eos_midi_bridge::{
-    CrossfadeState, MackieEvent, SystemCommand, clean_midi_name, config,
+    CrossfadeState, MackieEvent, SystemCommand, clean_midi_name, config, controller,
     midi::{Midi, handle_event_logic},
     osc::{OscClient, OscServer},
 };
@@ -41,7 +41,16 @@ fn main() -> anyhow::Result<()> {
     let osc_client = rt_handle
         .block_on(OscClient::new(&cfg.eos_ip, cfg.eos_osc_port))
         .context("Failed to create initial OSC client")?;
-    let midi = Arc::new(Mutex::new(Midi::new(osc_client)));
+
+    let profile = controller::load_profile(&cfg.controller_profile).unwrap_or_else(|e| {
+        warn!(
+            "Failed to load controller profile {}, using default: {}",
+            cfg.controller_profile, e
+        );
+        controller::ControllerProfile::default()
+    });
+
+    let midi = Arc::new(Mutex::new(Midi::new(osc_client, profile)));
 
     // Background Event Processor (always running)
     let midi_logic = Arc::clone(&midi);
@@ -62,7 +71,8 @@ fn main() -> anyhow::Result<()> {
                 if m.crossfade_state == CrossfadeState::Pause {
                     tick = !tick;
                     let vel = if tick { 127 } else { 0 };
-                    m.send_queue.enqueue(vec![0x90, 94, vel]);
+                    let go_note = m.profile.buttons.go_note;
+                    m.send_queue.enqueue(vec![0x90, go_note, vel]);
                 }
             }
         }
@@ -87,6 +97,17 @@ fn main() -> anyhow::Result<()> {
             {
                 let mut m = supervision_midi.lock().unwrap();
                 m.connections.clear();
+
+                // Reload profile if needed
+                let profile_path = &config.controller_profile;
+                // Reload the profile based on the current config
+                match controller::load_profile(profile_path) {
+                    Ok(p) => {
+                        info!("Loaded controller profile: {}", p.name);
+                        m.profile = p;
+                    }
+                    Err(e) => error!("Failed to reload profile {}: {}", profile_path, e),
+                }
             }
 
             // Small delay to ensure OS releases UDP ports
@@ -267,7 +288,7 @@ fn main() -> anyhow::Result<()> {
 
     // Launch the GUI
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 500.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 530.0]),
         ..Default::default()
     };
     let app_midi = midi.clone();

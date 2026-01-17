@@ -1,0 +1,38 @@
+{
+  "name": "iCon Platform M+",
+  "fader_count": 9,
+  "eos_bank_size": 10,
+  "fader_protocol": "pitchwheel",
+  "fader_channels": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "display": {
+    "sysex_prefix": [
+      0,
+      0,
+      102,
+      20,
+      18
+    ],
+    "line_length": 56,
+    "strip_width": 7,
+    "line_offsets": [
+      56,
+      0
+    ]
+  },
+  "buttons": {
+    "go_note": 94,
+    "stop_note": 93,
+    "page_up_note": 46,
+    "page_down_note": 47
+  }
+}

@@ -11,6 +11,7 @@ pub struct BridgeApp {
     pub last_applied_config: BridgeConfig,
     pub status_message: String,
     pub eos_ip_edit: String,
+    pub controller_profile_edit: String,
     pub tx_system: mpsc::Sender<SystemCommand>,
 }
 
@@ -24,6 +25,7 @@ impl BridgeApp {
             midi,
             last_applied_config: config.clone(),
             eos_ip_edit: config.eos_ip.clone(),
+            controller_profile_edit: config.controller_profile.clone(),
             config_edit: config,
             status_message: "Ready".to_string(),
             tx_system,
@@ -140,6 +142,15 @@ impl eframe::App for BridgeApp {
                         self.config_edit.midi_out_name = selected_out;
                         ui.end_row();
                     }
+
+                    ui.label("Controller Profile PATH:");
+                    if ui
+                        .text_edit_singleline(&mut self.controller_profile_edit)
+                        .changed()
+                    {
+                        self.config_edit.controller_profile = self.controller_profile_edit.clone();
+                    }
+                    ui.end_row();
                 });
 
             ui.add_space(20.0);
@@ -196,7 +207,8 @@ impl eframe::App for BridgeApp {
                     ui.add_space(5.0);
 
                     ui.horizontal_top(|ui| {
-                        for i in 0..9 {
+                        let bank_size = m.profile.eos_bank_size;
+                        for i in 0..bank_size {
                             let column_width = 75.0;
                             ui.allocate_ui(egui::vec2(column_width, 200.0), |ui| {
                                 ui.vertical_centered(|ui| {
