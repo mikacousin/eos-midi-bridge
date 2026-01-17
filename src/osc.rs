@@ -187,6 +187,32 @@ impl OscServer {
                         }
                     }
                 }
+            } else if msg.addr == "/eos/out/ping" {
+                let mut sync_needed = false;
+                {
+                    let mut m = midi.lock().unwrap();
+                    m.last_osc_heartbeat = std::time::Instant::now();
+                    if m.needs_sync {
+                        m.needs_sync = false;
+                        sync_needed = true;
+                    }
+                }
+
+                if sync_needed {
+                    info!("Eos Pong received! Triggering initial sync...");
+                    let client = {
+                        let m = midi.lock().unwrap();
+                        m.osc_client.clone()
+                    };
+                    tokio::spawn(async move {
+                        // User requested /eos/usr/1/fader/1/config/10
+                        // Standard Eos is /eos/user/1/fader/1/config/10
+                        let _ = client.send("/eos/user/1/fader/1/config/10", vec![]).await;
+                        let _ = client
+                            .send("/eos/subscribe", vec![rosc::OscType::Int(1)])
+                            .await;
+                    });
+                }
             } else if msg.addr.starts_with("/eos/out/active/cue") {
                 if let Some(OscType::Float(progress)) = msg.args.get(0) {
                     let mut m = midi.lock().unwrap();

@@ -103,6 +103,37 @@ fn main() -> anyhow::Result<()> {
                 }
             });
 
+            // OSC Heartbeat Loop
+            let heartbeat_midi = Arc::clone(&supervision_midi);
+            let heartbeat_token = current_cancel_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            let (client, last_heartbeat) = {
+                                let m = heartbeat_midi.lock().unwrap();
+                                (m.osc_client.clone(), m.last_osc_heartbeat)
+                            };
+
+                            // Send Ping
+                            let _ = client.send("/eos/ping", vec![]).await;
+
+                            // Check for timeout (10 seconds)
+                            if last_heartbeat.elapsed() > Duration::from_secs(10) {
+                                let mut m = heartbeat_midi.lock().unwrap();
+                                if !m.connection_status.contains("❌ Eos Connection Lost") {
+                                    warn!("Eos Connection Lost (Heartbeat timeout)");
+                                    m.connection_status = "❌ Eos Connection Lost".to_string();
+                                    m.needs_sync = true; // Retry sync when it comes back
+                                }
+                            }
+                        }
+                        _ = heartbeat_token.cancelled() => break,
+                    }
+                }
+            });
+
             // Let the server bind
             tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -111,20 +142,9 @@ fn main() -> anyhow::Result<()> {
                 Ok(new_client) => {
                     let mut m = supervision_midi.lock().unwrap();
                     m.osc_client = new_client.clone();
-
-                    // Request initial fader configuration and data from Eos
-                    let init_client = new_client.clone();
-                    tokio::spawn(async move {
-                        // Small extra delay to ensure Eos sees us online
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        let _ = init_client
-                            .send("/eos/user/1/fader/1/config/1/10", vec![])
-                            .await;
-                        let _ = init_client
-                            .send("/eos/subscribe", vec![rosc::OscType::Int(1)])
-                            .await;
-                        info!("OSC Sync commands sent to Eos");
-                    });
+                    // Mark as needing sync, will be triggered by first Pong
+                    m.needs_sync = true;
+                    m.last_osc_heartbeat = std::time::Instant::now();
                 }
                 Err(e) => {
                     error!("Failed to create OSC client: {}", e);
