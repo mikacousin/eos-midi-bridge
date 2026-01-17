@@ -19,7 +19,7 @@ pub struct Midi {
     pub connection_status: String,
     pub available_in_ports: Vec<String>,
     pub available_out_ports: Vec<String>,
-    pub last_osc_heartbeat: std::time::Instant,
+    pub last_osc_heartbeat: Option<std::time::Instant>,
     pub needs_sync: bool,
 }
 
@@ -39,7 +39,7 @@ impl Midi {
             connection_status: "Disconnected".to_string(),
             available_in_ports: Vec::new(),
             available_out_ports: Vec::new(),
-            last_osc_heartbeat: std::time::Instant::now(),
+            last_osc_heartbeat: None,
             needs_sync: true,
         }
     }

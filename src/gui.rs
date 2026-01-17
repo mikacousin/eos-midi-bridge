@@ -34,7 +34,35 @@ impl BridgeApp {
 impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Eos Mackie Bridge Settings");
+            ui.horizontal(|ui| {
+                ui.heading("Eos Mackie Bridge Settings");
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (status_text, color) = if let Ok(m) = self.midi.lock() {
+                        match m.last_osc_heartbeat {
+                            None => ("WAITING EOS", egui::Color32::GRAY),
+                            Some(last) if last.elapsed() < std::time::Duration::from_secs(4) => {
+                                ("EOS CONNECTED", egui::Color32::GREEN)
+                            }
+                            _ => ("EOS DISCONNECTED", egui::Color32::RED),
+                        }
+                    } else {
+                        ("WAITING EOS", egui::Color32::GRAY)
+                    };
+
+                    ui.add_space(10.0);
+                    // Draw a small circle as a LED
+                    let (rect, _response) =
+                        ui.allocate_at_least(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 6.0, color);
+                    ui.label(
+                        egui::RichText::new(status_text)
+                            .strong()
+                            .color(color)
+                            .small(),
+                    );
+                });
+            });
             ui.separator();
 
             egui::Grid::new("config_grid")

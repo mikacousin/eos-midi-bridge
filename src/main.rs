@@ -107,7 +107,7 @@ fn main() -> anyhow::Result<()> {
             let heartbeat_midi = Arc::clone(&supervision_midi);
             let heartbeat_token = current_cancel_token.clone();
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                let mut interval = tokio::time::interval(Duration::from_secs(2));
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {
@@ -119,12 +119,10 @@ fn main() -> anyhow::Result<()> {
                             // Send Ping
                             let _ = client.send("/eos/ping", vec![]).await;
 
-                            // Check for timeout (10 seconds)
-                            if last_heartbeat.elapsed() > Duration::from_secs(10) {
-                                let mut m = heartbeat_midi.lock().unwrap();
-                                if !m.connection_status.contains("❌ Eos Connection Lost") {
-                                    warn!("Eos Connection Lost (Heartbeat timeout)");
-                                    m.connection_status = "❌ Eos Connection Lost".to_string();
+                            // Check for timeout if we ever received a pong
+                            if let Some(last) = last_heartbeat {
+                                if last.elapsed() > Duration::from_secs(4) {
+                                    let mut m = heartbeat_midi.lock().unwrap();
                                     m.needs_sync = true; // Retry sync when it comes back
                                 }
                             }
@@ -144,13 +142,10 @@ fn main() -> anyhow::Result<()> {
                     m.osc_client = new_client.clone();
                     // Mark as needing sync, will be triggered by first Pong
                     m.needs_sync = true;
-                    m.last_osc_heartbeat = std::time::Instant::now();
+                    m.last_osc_heartbeat = None;
                 }
                 Err(e) => {
                     error!("Failed to create OSC client: {}", e);
-                    if let Ok(mut m) = supervision_midi.lock() {
-                        m.connection_status = format!("❌ OSC Error: {}", e);
-                    }
                 }
             }
 

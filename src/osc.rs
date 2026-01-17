@@ -191,7 +191,7 @@ impl OscServer {
                 let mut sync_needed = false;
                 {
                     let mut m = midi.lock().unwrap();
-                    m.last_osc_heartbeat = std::time::Instant::now();
+                    m.last_osc_heartbeat = Some(std::time::Instant::now());
                     if m.needs_sync {
                         m.needs_sync = false;
                         sync_needed = true;
