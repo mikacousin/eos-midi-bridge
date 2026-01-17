@@ -44,16 +44,26 @@ jobs:
     - name: Run Tests
       run: cargo test --verbose
 
-    - name: Prepare Binary
+    - name: Prepare Package
+      shell: bash
       run: |
-        mkdir -p bin
-        cp target/release/eos-midi-bridge${{ matrix.suffix }} bin/eos-midi-bridge-${{ matrix.artifact_name }}${{ matrix.suffix }}
+        PACKAGE_NAME="eos-midi-bridge-${{ matrix.artifact_name }}"
+        mkdir -p "$PACKAGE_NAME/profiles"
+        cp target/release/eos-midi-bridge${{ matrix.suffix }} "$PACKAGE_NAME/"
+        cp profiles/*.json "$PACKAGE_NAME/profiles/"
+        if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          7z a "${PACKAGE_NAME}.zip" "$PACKAGE_NAME"
+          echo "ASSET_NAME=${PACKAGE_NAME}.zip" >> $GITHUB_ENV
+        else
+          tar -czf "${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
+          echo "ASSET_NAME=${PACKAGE_NAME}.tar.gz" >> $GITHUB_ENV
+        fi
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: eos-midi-bridge-${{ matrix.artifact_name }}
-        path: bin/
+        name: ${{ matrix.artifact_name }}-package
+        path: ${{ env.ASSET_NAME }}
 
   release:
     name: Create GitHub Release
@@ -72,10 +82,7 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            bin/eos-midi-bridge-windows.exe
-            bin/eos-midi-bridge-linux
-            bin/eos-midi-bridge-macos
+          files: bin/*
           generate_release_notes: true
           draft: false
           prerelease: false
