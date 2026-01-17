@@ -61,9 +61,11 @@ impl eframe::App for BridgeApp {
                         ui.label("MIDI Input:");
                         let mut selected_in = self.config_edit.midi_in_name.clone();
 
-                        // Check if the saved port is still available
+                        // Only reset to None if we actually have ports and the selected one is missing
                         if let Some(ref name) = selected_in {
-                            if !m.available_in_ports.contains(name) {
+                            if !m.available_in_ports.is_empty()
+                                && !m.available_in_ports.contains(name)
+                            {
                                 selected_in = None;
                             }
                         }
@@ -84,9 +86,11 @@ impl eframe::App for BridgeApp {
                         ui.label("MIDI Output:");
                         let mut selected_out = self.config_edit.midi_out_name.clone();
 
-                        // Check if the saved port is still available
+                        // Only reset to None if we actually have ports and the selected one is missing
                         if let Some(ref name) = selected_out {
-                            if !m.available_out_ports.contains(name) {
+                            if !m.available_out_ports.is_empty()
+                                && !m.available_out_ports.contains(name)
+                            {
                                 selected_out = None;
                             }
                         }

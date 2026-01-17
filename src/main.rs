@@ -89,6 +89,23 @@ fn main() -> anyhow::Result<()> {
                 m.connections.clear();
             }
 
+            // Small delay to ensure OS releases UDP ports
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Start OSC Server FIRST so we are ready for Eos replies
+            let server_midi = Arc::clone(&supervision_midi);
+            let server_token = current_cancel_token.clone();
+            let listen_port = config.bridge_listen_port;
+            tokio::spawn(async move {
+                let server = OscServer { port: listen_port };
+                if let Err(e) = server.start(server_midi, server_token).await {
+                    error!("OSC Server Error: {}", e);
+                }
+            });
+
+            // Let the server bind
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
             // Create new OSC client with updated config
             match OscClient::new(&config.eos_ip, config.eos_osc_port).await {
                 Ok(new_client) => {
@@ -98,12 +115,15 @@ fn main() -> anyhow::Result<()> {
                     // Request initial fader configuration and data from Eos
                     let init_client = new_client.clone();
                     tokio::spawn(async move {
+                        // Small extra delay to ensure Eos sees us online
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                         let _ = init_client
                             .send("/eos/user/1/fader/1/config/1/10", vec![])
                             .await;
                         let _ = init_client
                             .send("/eos/subscribe", vec![rosc::OscType::Int(1)])
                             .await;
+                        info!("OSC Sync commands sent to Eos");
                     });
                 }
                 Err(e) => {
@@ -132,17 +152,6 @@ fn main() -> anyhow::Result<()> {
                         }
                         _ = pump_token.cancelled() => break,
                     }
-                }
-            });
-
-            // Start OSC Server
-            let server_midi = Arc::clone(&supervision_midi);
-            let server_token = current_cancel_token.clone();
-            let listen_port = config.bridge_listen_port;
-            tokio::spawn(async move {
-                let server = OscServer { port: listen_port };
-                if let Err(e) = server.start(server_midi, server_token).await {
-                    error!("OSC Server Error: {}", e);
                 }
             });
 
@@ -184,6 +193,30 @@ fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    // Pre-flight scan: Populate available MIDI ports before launching anything else
+    {
+        let in_ports = match MidiInput::new("Preflight In") {
+            Ok(scanner) => scanner
+                .ports()
+                .iter()
+                .filter_map(|p| scanner.port_name(p).ok().map(|name| clean_midi_name(&name)))
+                .collect::<Vec<String>>(),
+            Err(_) => Vec::new(),
+        };
+        let out_ports = match MidiOutput::new("Preflight Out") {
+            Ok(scanner) => scanner
+                .ports()
+                .iter()
+                .filter_map(|p| scanner.port_name(p).ok().map(|name| clean_midi_name(&name)))
+                .collect::<Vec<String>>(),
+            Err(_) => Vec::new(),
+        };
+        if let Ok(mut m) = midi.lock() {
+            m.available_in_ports = in_ports;
+            m.available_out_ports = out_ports;
+        }
+    }
 
     // MIDI Monitoring Task: Periodically scan ports and check connectivity
     let monitor_midi = Arc::clone(&midi);
