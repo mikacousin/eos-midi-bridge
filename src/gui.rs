@@ -13,6 +13,7 @@ pub struct BridgeApp {
     pub eos_ip_edit: String,
     pub controller_profile_edit: String,
     pub tx_system: mpsc::Sender<SystemCommand>,
+    pub file_dialog: egui_file_dialog::FileDialog,
 }
 
 impl BridgeApp {
@@ -29,6 +30,7 @@ impl BridgeApp {
             config_edit: config,
             status_message: "Ready".to_string(),
             tx_system,
+            file_dialog: egui_file_dialog::FileDialog::new(),
         }
     }
 }
@@ -143,12 +145,24 @@ impl eframe::App for BridgeApp {
                         ui.end_row();
                     }
 
-                    ui.label("Controller Profile PATH:");
-                    if ui
-                        .text_edit_singleline(&mut self.controller_profile_edit)
-                        .changed()
-                    {
-                        self.config_edit.controller_profile = self.controller_profile_edit.clone();
+                    ui.label("Controller Profile:");
+                    ui.horizontal(|ui| {
+                        let controller_name = if let Ok(m) = self.midi.lock() {
+                            m.profile.name.clone()
+                        } else {
+                            "Unknown".to_string()
+                        };
+                        ui.label(egui::RichText::new(controller_name).strong());
+
+                        if ui.button("📂 Change...").clicked() {
+                            self.file_dialog.pick_file();
+                        }
+                    });
+
+                    if let Some(path) = self.file_dialog.update(ctx).picked() {
+                        let path_str = path.to_string_lossy().to_string();
+                        self.controller_profile_edit = path_str.clone();
+                        self.config_edit.controller_profile = path_str;
                     }
                     ui.end_row();
                 });
