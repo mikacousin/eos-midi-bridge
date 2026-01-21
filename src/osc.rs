@@ -107,15 +107,24 @@ impl OscServer {
                         }
 
                         // Send to LCD strip if physically available
-                        let (lcd_segments, clean_text) = {
+                        let should_display = {
                             let m = midi.lock().unwrap();
-                            let lcd_seg =
-                                m.profile.display.line_length / m.profile.display.strip_width;
-                            let t = m.fader_names[f_num - 1].clone();
-                            (lcd_seg, t)
+                            if let Some(ref visible) = m.profile.display.visible_faders {
+                                visible.contains(&f_num)
+                            } else {
+                                // Fallback to "all faders that fit on screen have displays"
+                                let lcd_segments = m.profile.display.line_length / m.profile.display.strip_width;
+                                f_num <= lcd_segments
+                            }
                         };
 
-                        if f_num <= lcd_segments {
+                        if should_display {
+                            let clean_text = {
+                                let m = midi.lock().unwrap();
+                                m.fader_names[f_num - 1].clone()
+                            };
+
+
                             let clean_text_stripped = strip_accents(&clean_text);
                             let line0: String = clean_text_stripped.chars().take(6).collect();
                             let line1: String =

@@ -8,6 +8,7 @@ pub struct DisplayProfile {
     pub line_length: usize,
     pub strip_width: usize,
     pub line_offsets: Vec<u8>,
+    pub visible_faders: Option<Vec<usize>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -101,6 +102,7 @@ impl Default for ControllerProfile {
                 line_length: 56,
                 strip_width: 7,
                 line_offsets: vec![56, 0],
+                visible_faders: None,
             },
             mappings: vec![
                 // Example: Go button
