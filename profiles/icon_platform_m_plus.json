@@ -85,7 +85,19 @@
       "action": {
         "type": "fader_page_up"
       },
-      "outputs": []
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/config/{page}/{bank_size}",
+          "arg_type": "none"
+        },
+        {
+          "type": "midi_note",
+          "note": 46,
+          "channel": 0,
+          "velocity": 127
+        }
+      ]
     },
     {
       "trigger": {
@@ -97,7 +109,19 @@
       "action": {
         "type": "fader_page_down"
       },
-      "outputs": []
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/config/{page}/{bank_size}",
+          "arg_type": "none"
+        },
+        {
+          "type": "midi_note",
+          "note": 47,
+          "channel": 0,
+          "velocity": 127
+        }
+      ]
     },
     {
       "trigger": {

@@ -492,7 +492,7 @@ impl BridgeApp {
                 (1, m_idx - split_idx)
             };
 
-            let x_base = col_idx as f32 * 800.0;
+            let x_base = col_idx as f32 * 1200.0;
             let y_base = row_idx as f32 * 150.0;
 
             let trigger_id = self.snarl.insert_node(

@@ -346,12 +346,29 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                         }
                     }
 
+                    // Capture dynamic values for OSC replacement
+                    let (current_page, bank_size) = {
+                        let m = midi.lock().unwrap();
+                        (m.fader_page, m.profile.eos_bank_size)
+                    };
+
                     // Output Processing
                     for (out_idx, output) in mapping.outputs.iter().enumerate() {
                         match output {
                             crate::controller::Output::Osc { addr, arg_type } => {
                                 let client_clone = client.clone();
-                                let addr = addr.clone();
+                                let mut final_addr = addr.clone();
+
+                                // Perform dynamic replacement
+                                if final_addr.contains("{page}") {
+                                    final_addr =
+                                        final_addr.replace("{page}", &current_page.to_string());
+                                }
+                                if final_addr.contains("{bank_size}") {
+                                    final_addr =
+                                        final_addr.replace("{bank_size}", &bank_size.to_string());
+                                }
+
                                 let arg_type = arg_type.clone();
 
                                 // For Faders, we need the value
@@ -373,17 +390,18 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                                 };
 
                                 let midi_for_log = Arc::clone(&midi);
-                                let addr_for_log = addr.clone();
+                                let addr_for_log = final_addr.clone();
                                 tokio::spawn(async move {
                                     let mut success = false;
                                     if arg_type == "float" {
                                         if let Some(a) = arg {
-                                            if client_clone.send(&addr, vec![a]).await.is_ok() {
+                                            if client_clone.send(&final_addr, vec![a]).await.is_ok()
+                                            {
                                                 success = true;
                                             }
                                         }
                                     } else {
-                                        if client_clone.send(&addr, vec![]).await.is_ok() {
+                                        if client_clone.send(&final_addr, vec![]).await.is_ok() {
                                             success = true;
                                         }
                                     }
