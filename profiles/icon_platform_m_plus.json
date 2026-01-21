@@ -263,12 +263,13 @@
         "channel": 8
       },
       "action": {
-        "type": "master_fader_move"
+        "type": "fader_move",
+        "index": 8
       },
       "outputs": [
         {
           "type": "osc",
-          "addr": "/eos/user/1/fader/1/10",
+          "addr": "/eos/user/1/fader/1/9",
           "arg_type": "float"
         },
         {

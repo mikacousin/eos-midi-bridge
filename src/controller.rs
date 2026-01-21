@@ -73,7 +73,7 @@ pub enum LogicalAction {
     FaderPageUp,
     FaderPageDown,
     FaderMove { index: usize },
-    MasterFaderMove,
+    // MasterFaderMove removed
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

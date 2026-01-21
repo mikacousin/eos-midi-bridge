@@ -21,6 +21,7 @@ pub struct Midi {
     pub available_out_ports: Vec<String>,
     pub last_osc_heartbeat: Option<std::time::Instant>,
     pub needs_sync: bool,
+    pub activity_log: Vec<crate::ActivityEvent>,
 }
 
 impl Midi {
@@ -43,6 +44,7 @@ impl Midi {
             available_out_ports: Vec::new(),
             last_osc_heartbeat: None,
             needs_sync: true,
+            activity_log: Vec::new(),
         }
     }
 
@@ -183,7 +185,7 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
             };
 
             // Find matching mappings
-            for mapping in &profile.mappings {
+            for (mapping_idx, mapping) in profile.mappings.iter().enumerate() {
                 let matches = match (&mapping.trigger, &trigger) {
                     (
                         crate::controller::Trigger::MidiNote {
@@ -219,23 +221,62 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                 };
 
                 if matches {
+                    // Log trigger activity
+                    {
+                        let mut m = midi.lock().unwrap();
+                        m.activity_log.push(crate::ActivityEvent {
+                            mapping_idx,
+                            part: crate::ActivityPart::Trigger,
+                            value: match &trigger {
+                                crate::controller::Trigger::MidiNote { note, .. } => {
+                                    format!("Note {} (V:{})", note, d2)
+                                }
+                                crate::controller::Trigger::MidiCc { cc, .. } => {
+                                    format!("CC {} (V:{})", cc, d2)
+                                }
+                                crate::controller::Trigger::MidiPitchwheel { .. } => {
+                                    let value = ((d2 as i16) << 7) | (d1 as i16);
+                                    format!("Pitch {}", value - 8192)
+                                }
+                                _ => "Trigger".to_string(),
+                            },
+                        });
+                    }
+
                     // Logic Action Processing
                     match &mapping.action {
                         crate::controller::LogicalAction::Go => {
                             let mut m = midi.lock().unwrap();
                             m.crossfade_state = CrossfadeState::Go;
+                            m.activity_log.push(crate::ActivityEvent {
+                                mapping_idx,
+                                part: crate::ActivityPart::Action,
+                                value: "GO".to_string(),
+                            });
                         }
                         crate::controller::LogicalAction::Stop => {
                             let mut m = midi.lock().unwrap();
-                            if m.crossfade_state == CrossfadeState::Go {
+                            let label = if m.crossfade_state == CrossfadeState::Go {
                                 m.crossfade_state = CrossfadeState::Pause;
+                                "PAUSE"
                             } else {
                                 m.crossfade_state = CrossfadeState::GoBack;
-                            }
+                                "BACK"
+                            };
+                            m.activity_log.push(crate::ActivityEvent {
+                                mapping_idx,
+                                part: crate::ActivityPart::Action,
+                                value: label.to_string(),
+                            });
                         }
                         crate::controller::LogicalAction::Resume => {
                             let mut m = midi.lock().unwrap();
                             m.crossfade_state = CrossfadeState::Go;
+                            m.activity_log.push(crate::ActivityEvent {
+                                mapping_idx,
+                                part: crate::ActivityPart::Action,
+                                value: "RESUME".to_string(),
+                            });
                         }
                         crate::controller::LogicalAction::FaderPageUp
                         | crate::controller::LogicalAction::FaderPageDown => {
@@ -258,6 +299,12 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                                 }
                                 m.last_page_change = time::Instant::now();
                                 m.show_page_number(m.fader_page);
+                                let page = m.fader_page;
+                                m.activity_log.push(crate::ActivityEvent {
+                                    mapping_idx,
+                                    part: crate::ActivityPart::Action,
+                                    value: format!("PAGE {}", page),
+                                });
                                 (m.fader_page, m.page_display_time, profile.eos_bank_size)
                             };
 
@@ -290,16 +337,17 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                             let mut m = midi.lock().unwrap();
                             if *index < m.fader_levels.len() {
                                 m.fader_levels[*index] = f_val;
-                                // We don't echo back here usually, but if the user wants it, they add a MidiPitchwheel output
+                                m.activity_log.push(crate::ActivityEvent {
+                                    mapping_idx,
+                                    part: crate::ActivityPart::Action,
+                                    value: format!("{:.0}%", f_val * 100.0),
+                                });
                             }
-                        }
-                        crate::controller::LogicalAction::MasterFaderMove => {
-                            // Similar logic for master fader
                         }
                     }
 
                     // Output Processing
-                    for output in &mapping.outputs {
+                    for (out_idx, output) in mapping.outputs.iter().enumerate() {
                         match output {
                             crate::controller::Output::Osc { addr, arg_type } => {
                                 let client_clone = client.clone();
@@ -318,13 +366,29 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                                         None
                                     };
 
+                                let midi_for_log = Arc::clone(&midi);
+                                let addr_for_log = addr.clone();
                                 tokio::spawn(async move {
+                                    let mut success = false;
                                     if arg_type == "float" {
                                         if let Some(a) = arg {
-                                            let _ = client_clone.send(&addr, vec![a]).await;
+                                            if client_clone.send(&addr, vec![a]).await.is_ok() {
+                                                success = true;
+                                            }
                                         }
                                     } else {
-                                        let _ = client_clone.send(&addr, vec![]).await;
+                                        if client_clone.send(&addr, vec![]).await.is_ok() {
+                                            success = true;
+                                        }
+                                    }
+
+                                    if success {
+                                        let mut m = midi_for_log.lock().unwrap();
+                                        m.activity_log.push(crate::ActivityEvent {
+                                            mapping_idx,
+                                            part: crate::ActivityPart::Output(out_idx),
+                                            value: addr_for_log,
+                                        });
                                     }
                                 });
                             }
@@ -333,16 +397,26 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                                 channel,
                                 velocity,
                             } => {
-                                let m = midi.lock().unwrap();
+                                let mut m = midi.lock().unwrap();
                                 m.send_queue.enqueue(vec![0x90 | channel, *note, *velocity]);
+                                m.activity_log.push(crate::ActivityEvent {
+                                    mapping_idx,
+                                    part: crate::ActivityPart::Output(out_idx),
+                                    value: format!("Note {} (V:{})", note, velocity),
+                                });
                             }
                             crate::controller::Output::MidiPitchwheel { channel } => {
                                 let value = ((d2 as i16) << 7) | (d1 as i16);
-                                let m = midi.lock().unwrap();
+                                let mut m = midi.lock().unwrap();
                                 let mut data = vec![0xE0 | channel];
                                 data.push((value & 0x7F) as u8);
                                 data.push(((value >> 7) & 0x7F) as u8);
                                 m.send_queue.enqueue(data);
+                                m.activity_log.push(crate::ActivityEvent {
+                                    mapping_idx,
+                                    part: crate::ActivityPart::Output(out_idx),
+                                    value: format!("Pitch {}", value - 8192),
+                                });
                             }
                             _ => {}
                         }

@@ -28,6 +28,20 @@ pub enum CrossfadeState {
     Pause,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ActivityPart {
+    Trigger,
+    Action,
+    Output(usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct ActivityEvent {
+    pub mapping_idx: usize,
+    pub part: ActivityPart,
+    pub value: String,
+}
+
 #[derive(Clone)]
 pub struct Queue<T> {
     elements: Arc<Mutex<VecDeque<T>>>,

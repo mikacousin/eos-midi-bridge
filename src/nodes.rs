@@ -6,11 +6,41 @@ use egui_snarl::{
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug)]
+pub struct NodeLiveState {
+    pub last_value: String,
+    pub last_activity: Option<std::time::Instant>,
+}
+
+impl Default for NodeLiveState {
+    fn default() -> Self {
+        Self {
+            last_value: String::new(),
+            last_activity: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum NodeData {
-    Trigger(Trigger),
-    Action(LogicalAction),
-    Output(Output),
+    Trigger(
+        Trigger,
+        #[serde(skip)]
+        #[serde(default)]
+        NodeLiveState,
+    ),
+    Action(
+        LogicalAction,
+        #[serde(skip)]
+        #[serde(default)]
+        NodeLiveState,
+    ),
+    Output(
+        Output,
+        #[serde(skip)]
+        #[serde(default)]
+        NodeLiveState,
+    ),
 }
 
 pub struct NodeGraphViewer {
@@ -20,30 +50,30 @@ pub struct NodeGraphViewer {
 
 impl SnarlViewer<NodeData> for NodeGraphViewer {
     fn title(&mut self, node: &NodeData) -> String {
-        match node {
-            NodeData::Trigger(t) => match t {
+        let t = match node {
+            NodeData::Trigger(t, _) => match t {
                 Trigger::MidiNote { note, .. } => format!("MIDI Note {}", note),
                 Trigger::MidiCc { cc, .. } => format!("MIDI CC {}", cc),
                 Trigger::MidiPitchwheel { .. } => "MIDI Pitchwheel".to_string(),
                 Trigger::Osc { addr } => format!("OSC In: {}", addr),
             },
-            NodeData::Action(a) => match a {
+            NodeData::Action(a, _) => match a {
                 LogicalAction::Go => "Action: GO".to_string(),
                 LogicalAction::Stop => "Action: STOP".to_string(),
                 LogicalAction::Resume => "Action: RESUME".to_string(),
                 LogicalAction::FaderMove { index } => format!("Action: Fader {}", index + 1),
-                LogicalAction::MasterFaderMove => "Action: Master Fader".to_string(),
-                LogicalAction::FaderPageUp => "Action: Page UP".to_string(),
-                LogicalAction::FaderPageDown => "Action: Page DOWN".to_string(),
+                LogicalAction::FaderPageUp => "Action: Page DOWN".to_string(),
+                LogicalAction::FaderPageDown => "Action: Page UP".to_string(),
             },
-            NodeData::Output(o) => match o {
+            NodeData::Output(o, _) => match o {
                 Output::Osc { addr, .. } => format!("OSC Out: {}", addr),
                 Output::MidiNote { note, .. } => format!("MIDI LED {}", note),
                 Output::MidiPitchwheel { .. } => "Fader FB".to_string(),
                 Output::LcdStrip { strip, .. } => format!("LCD Strip {}", strip),
                 Output::LcdText { text, .. } => format!("LCD Text: {}", text),
             },
-        }
+        };
+        t
     }
 
     fn show_body(
@@ -55,51 +85,92 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
         snarl: &mut Snarl<NodeData>,
     ) {
         let node = &snarl[node_id];
-        ui.vertical(|ui| match node {
-            NodeData::Trigger(t) => match t {
-                Trigger::MidiNote { channel, mode, .. } => {
-                    ui.label(format!("Ch: {}, Mode: {:?}", *channel + 1, mode));
+        let live_state = match node {
+            NodeData::Trigger(_, s) => s,
+            NodeData::Action(_, s) => s,
+            NodeData::Output(_, s) => s,
+        };
+
+        ui.vertical(|ui| {
+            // Show Live Value if present with highlight if active
+            if !live_state.last_value.is_empty() {
+                let elapsed = live_state
+                    .last_activity
+                    .map(|last| last.elapsed().as_millis());
+                let is_active = elapsed.map_or(false, |e| e < 300);
+
+                if is_active {
+                    // Request continuous repaint while flashing
+                    ui.ctx().request_repaint();
                 }
-                Trigger::MidiCc { channel, .. } => {
-                    ui.label(format!("Ch: {}", *channel + 1));
-                }
-                Trigger::MidiPitchwheel { channel } => {
-                    ui.label(format!("Ch: {}", *channel + 1));
-                }
-                Trigger::Osc { .. } => {}
-            },
-            NodeData::Action(_) => {}
-            NodeData::Output(o) => match o {
-                Output::Osc { arg_type, .. } => {
-                    ui.label(format!("Arg: {}", arg_type));
-                }
-                Output::MidiNote {
-                    channel, velocity, ..
-                } => {
-                    ui.label(format!("Ch: {}, Vel: {}", *channel + 1, velocity));
-                }
-                Output::MidiPitchwheel { channel } => {
-                    ui.label(format!("Ch: {}", *channel + 1));
-                }
-                _ => {}
-            },
+
+                let text_color = if is_active {
+                    match node {
+                        NodeData::Trigger(..) => egui::Color32::from_rgb(0, 255, 0),
+                        NodeData::Action(..) => egui::Color32::from_rgb(255, 255, 0),
+                        NodeData::Output(..) => egui::Color32::from_rgb(255, 100, 100),
+                    }
+                } else {
+                    egui::Color32::WHITE
+                };
+
+                ui.label(
+                    egui::RichText::new(&live_state.last_value)
+                        .strong()
+                        .color(text_color),
+                );
+            }
+
+            match node {
+                NodeData::Trigger(t, _) => match t {
+                    Trigger::MidiNote { channel, mode, .. } => {
+                        ui.label(format!("Ch: {}, Mode: {:?}", *channel + 1, mode));
+                    }
+                    Trigger::MidiCc { channel, .. } => {
+                        ui.label(format!("Ch: {}", *channel + 1));
+                    }
+                    Trigger::MidiPitchwheel { channel } => {
+                        ui.label(format!("Ch: {}", *channel + 1));
+                    }
+                    Trigger::Osc { .. } => {}
+                },
+                NodeData::Action(_, _) => {}
+                NodeData::Output(o, _) => match o {
+                    Output::Osc { arg_type, .. } => {
+                        ui.label(format!("Arg: {}", arg_type));
+                    }
+                    Output::MidiNote {
+                        channel, velocity, ..
+                    } => {
+                        ui.label(format!("Ch: {}, Vel: {}", *channel + 1, velocity));
+                    }
+                    Output::MidiPitchwheel { channel } => {
+                        ui.label(format!("Ch: {}", *channel + 1));
+                    }
+                    _ => {}
+                },
+            }
         });
     }
 
     fn inputs(&mut self, node: &NodeData) -> usize {
         match node {
-            NodeData::Trigger(_) => 0,
-            NodeData::Action(_) => 1,
-            NodeData::Output(_) => 1,
+            NodeData::Trigger(..) => 0,
+            NodeData::Action(..) => 1,
+            NodeData::Output(..) => 1,
         }
     }
 
     fn outputs(&mut self, node: &NodeData) -> usize {
         match node {
-            NodeData::Trigger(_) => 1,
-            NodeData::Action(_) => 1,
-            NodeData::Output(_) => 0,
+            NodeData::Trigger(..) => 1,
+            NodeData::Action(..) => 1,
+            NodeData::Output(..) => 0,
         }
+    }
+
+    fn has_body(&mut self, _node: &NodeData) -> bool {
+        true
     }
 
     fn show_input(

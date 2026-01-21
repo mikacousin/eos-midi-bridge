@@ -24,6 +24,13 @@ pub struct BridgeApp {
     active_tab: Tab,
     pub snarl: egui_snarl::Snarl<eos_midi_bridge::nodes::NodeData>,
     pub snarl_zoom_pending: f32,
+    pub mapping_nodes: std::collections::HashMap<usize, MappingNodeIds>,
+}
+
+pub struct MappingNodeIds {
+    pub trigger: egui_snarl::NodeId,
+    pub action: egui_snarl::NodeId,
+    pub outputs: Vec<egui_snarl::NodeId>,
 }
 
 impl BridgeApp {
@@ -32,8 +39,8 @@ impl BridgeApp {
         config: BridgeConfig,
         tx_system: mpsc::Sender<SystemCommand>,
     ) -> Self {
-        Self {
-            midi,
+        let mut app = Self {
+            midi: midi.clone(),
             last_applied_config: config.clone(),
             eos_ip_edit: config.eos_ip.clone(),
             controller_profile_edit: config.controller_profile.clone(),
@@ -44,12 +51,72 @@ impl BridgeApp {
             active_tab: Tab::Console,
             snarl: egui_snarl::Snarl::new(),
             snarl_zoom_pending: 1.0,
+            mapping_nodes: std::collections::HashMap::new(),
+        };
+
+        // Pre-populate the node graph with the current profile
+        if let Ok(m) = midi.lock() {
+            app.populate_snarl(&m.profile);
         }
+
+        app
     }
 }
 
 impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // --- Activity Log Consumption ---
+        if let Ok(mut m) = self.midi.lock() {
+            if !m.activity_log.is_empty() {
+                let logs: Vec<_> = m.activity_log.drain(..).collect();
+                log::debug!("Received {} activity events", logs.len());
+                for event in logs {
+                    log::debug!(
+                        "Activity: mapping_idx={}, part={:?}, value={}",
+                        event.mapping_idx,
+                        event.part,
+                        event.value
+                    );
+
+                    if let Some(node_ids) = self.mapping_nodes.get(&event.mapping_idx) {
+                        let target_node_id = match event.part {
+                            eos_midi_bridge::ActivityPart::Trigger => Some(node_ids.trigger),
+                            eos_midi_bridge::ActivityPart::Action => Some(node_ids.action),
+                            eos_midi_bridge::ActivityPart::Output(i) => {
+                                node_ids.outputs.get(i).copied()
+                            }
+                        };
+
+                        if let Some(node_id) = target_node_id {
+                            if let Some(node) = self.snarl.get_node_mut(node_id) {
+                                let live_state = match node {
+                                    eos_midi_bridge::nodes::NodeData::Trigger(_, s) => s,
+                                    eos_midi_bridge::nodes::NodeData::Action(_, s) => s,
+                                    eos_midi_bridge::nodes::NodeData::Output(_, s) => s,
+                                };
+                                live_state.last_value = event.value.clone();
+                                live_state.last_activity = Some(std::time::Instant::now());
+                                log::debug!(
+                                    "Updated node {:?} with value: {}",
+                                    node_id,
+                                    event.value
+                                );
+                            }
+                        } else {
+                            log::warn!(
+                                "No node_id found for mapping_idx={}, part={:?}",
+                                event.mapping_idx,
+                                event.part
+                            );
+                        }
+                    } else {
+                        log::warn!("No mapping found for mapping_idx={}", event.mapping_idx);
+                    }
+                }
+                ctx.request_repaint();
+            }
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut populate_needed = None;
 
@@ -413,18 +480,24 @@ impl BridgeApp {
     fn populate_snarl(&mut self, profile: &eos_midi_bridge::controller::ControllerProfile) {
         use eos_midi_bridge::nodes::NodeData;
         self.snarl = egui_snarl::Snarl::new();
+        self.mapping_nodes.clear();
 
         for (m_idx, mapping) in profile.mappings.iter().enumerate() {
             let y_base = m_idx as f32 * 150.0;
 
             let trigger_id = self.snarl.insert_node(
                 egui::pos2(50.0, y_base + 50.0),
-                NodeData::Trigger(mapping.trigger.clone()),
+                NodeData::Trigger(mapping.trigger.clone(), Default::default()),
             );
+            self.snarl.open_node(trigger_id, true);
+
             let action_id = self.snarl.insert_node(
                 egui::pos2(300.0, y_base + 50.0),
-                NodeData::Action(mapping.action.clone()),
+                NodeData::Action(mapping.action.clone(), Default::default()),
             );
+            self.snarl.open_node(action_id, true);
+
+            let mut output_node_ids = Vec::new();
 
             self.snarl.connect(
                 egui_snarl::OutPinId {
@@ -440,8 +513,11 @@ impl BridgeApp {
             for (i, output) in mapping.outputs.iter().enumerate() {
                 let output_id = self.snarl.insert_node(
                     egui::pos2(550.0, y_base + i as f32 * 60.0),
-                    NodeData::Output(output.clone()),
+                    NodeData::Output(output.clone(), Default::default()),
                 );
+                self.snarl.open_node(output_id, true);
+                output_node_ids.push(output_id);
+
                 self.snarl.connect(
                     egui_snarl::OutPinId {
                         node: action_id,
@@ -453,6 +529,15 @@ impl BridgeApp {
                     },
                 );
             }
+
+            self.mapping_nodes.insert(
+                m_idx,
+                MappingNodeIds {
+                    trigger: trigger_id,
+                    action: action_id,
+                    outputs: output_node_ids,
+                },
+            );
         }
     }
 }
