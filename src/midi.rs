@@ -366,6 +366,12 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                                         None
                                     };
 
+                                let val_suffix = if let Some(rosc::OscType::Float(f)) = &arg {
+                                    format!(" {:.2}", f)
+                                } else {
+                                    String::new()
+                                };
+
                                 let midi_for_log = Arc::clone(&midi);
                                 let addr_for_log = addr.clone();
                                 tokio::spawn(async move {
@@ -387,7 +393,7 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                                         m.activity_log.push(crate::ActivityEvent {
                                             mapping_idx,
                                             part: crate::ActivityPart::Output(out_idx),
-                                            value: addr_for_log,
+                                            value: format!("{}{}", addr_for_log, val_suffix),
                                         });
                                     }
                                 });
