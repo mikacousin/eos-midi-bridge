@@ -71,8 +71,12 @@ fn main() -> anyhow::Result<()> {
                 if m.crossfade_state == CrossfadeState::Pause {
                     tick = !tick;
                     let vel = if tick { 127 } else { 0 };
-                    let go_note = m.profile.buttons.go_note;
-                    m.send_queue.enqueue(vec![0x90, go_note, vel]);
+                    if let Some((note, chan, _)) = m
+                        .profile
+                        .get_midi_output_for_action(crate::controller::LogicalAction::Go)
+                    {
+                        m.send_queue.enqueue(vec![0x90 | chan, note, vel]);
+                    }
                 }
             }
         }
@@ -288,7 +292,7 @@ fn main() -> anyhow::Result<()> {
 
     // Launch the GUI
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 530.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 510.0]),
         ..Default::default()
     };
     let app_midi = midi.clone();

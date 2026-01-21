@@ -1,6 +1,7 @@
 pub mod config;
 pub mod controller;
 pub mod midi;
+pub mod nodes;
 pub mod osc;
 
 use deunicode::deunicode;

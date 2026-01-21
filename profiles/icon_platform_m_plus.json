@@ -1,19 +1,6 @@
 {
   "name": "iCon Platform M+",
-  "fader_count": 9,
   "eos_bank_size": 10,
-  "fader_protocol": "pitchwheel",
-  "fader_channels": [
-    0,
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8
-  ],
   "display": {
     "sysex_prefix": [
       0,
@@ -29,10 +16,266 @@
       0
     ]
   },
-  "buttons": {
-    "go_note": 94,
-    "stop_note": 93,
-    "page_up_note": 46,
-    "page_down_note": 47
-  }
+  "mappings": [
+    {
+      "trigger": {
+        "type": "midi_note",
+        "note": 94,
+        "channel": 0,
+        "mode": "press"
+      },
+      "action": {
+        "type": "go"
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/key/go_0",
+          "arg_type": "none"
+        },
+        {
+          "type": "midi_note",
+          "note": 94,
+          "channel": 0,
+          "velocity": 127
+        }
+      ]
+    },
+    {
+      "trigger": {
+        "type": "midi_note",
+        "note": 93,
+        "channel": 0,
+        "mode": "press"
+      },
+      "action": {
+        "type": "stop"
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/key/stop",
+          "arg_type": "none"
+        },
+        {
+          "type": "midi_note",
+          "note": 93,
+          "channel": 0,
+          "velocity": 127
+        }
+      ]
+    },
+    {
+      "trigger": {
+        "type": "midi_note",
+        "note": 46,
+        "channel": 0,
+        "mode": "press"
+      },
+      "action": {
+        "type": "fader_page_up"
+      },
+      "outputs": []
+    },
+    {
+      "trigger": {
+        "type": "midi_note",
+        "note": 47,
+        "channel": 0,
+        "mode": "press"
+      },
+      "action": {
+        "type": "fader_page_down"
+      },
+      "outputs": []
+    },
+    {
+      "trigger": {
+        "type": "midi_pitchwheel",
+        "channel": 0
+      },
+      "action": {
+        "type": "fader_move",
+        "index": 0
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/1",
+          "arg_type": "float"
+        },
+        {
+          "type": "midi_pitchwheel",
+          "channel": 0
+        }
+      ]
+    },
+    {
+      "trigger": {
+        "type": "midi_pitchwheel",
+        "channel": 1
+      },
+      "action": {
+        "type": "fader_move",
+        "index": 1
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/2",
+          "arg_type": "float"
+        },
+        {
+          "type": "midi_pitchwheel",
+          "channel": 1
+        }
+      ]
+    },
+    {
+      "trigger": {
+        "type": "midi_pitchwheel",
+        "channel": 2
+      },
+      "action": {
+        "type": "fader_move",
+        "index": 2
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/3",
+          "arg_type": "float"
+        },
+        {
+          "type": "midi_pitchwheel",
+          "channel": 2
+        }
+      ]
+    },
+    {
+      "trigger": {
+        "type": "midi_pitchwheel",
+        "channel": 3
+      },
+      "action": {
+        "type": "fader_move",
+        "index": 3
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/4",
+          "arg_type": "float"
+        },
+        {
+          "type": "midi_pitchwheel",
+          "channel": 3
+        }
+      ]
+    },
+    {
+      "trigger": {
+        "type": "midi_pitchwheel",
+        "channel": 4
+      },
+      "action": {
+        "type": "fader_move",
+        "index": 4
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/5",
+          "arg_type": "float"
+        },
+        {
+          "type": "midi_pitchwheel",
+          "channel": 4
+        }
+      ]
+    },
+    {
+      "trigger": {
+        "type": "midi_pitchwheel",
+        "channel": 5
+      },
+      "action": {
+        "type": "fader_move",
+        "index": 5
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/6",
+          "arg_type": "float"
+        },
+        {
+          "type": "midi_pitchwheel",
+          "channel": 5
+        }
+      ]
+    },
+    {
+      "trigger": {
+        "type": "midi_pitchwheel",
+        "channel": 6
+      },
+      "action": {
+        "type": "fader_move",
+        "index": 6
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/7",
+          "arg_type": "float"
+        },
+        {
+          "type": "midi_pitchwheel",
+          "channel": 6
+        }
+      ]
+    },
+    {
+      "trigger": {
+        "type": "midi_pitchwheel",
+        "channel": 7
+      },
+      "action": {
+        "type": "fader_move",
+        "index": 7
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/8",
+          "arg_type": "float"
+        },
+        {
+          "type": "midi_pitchwheel",
+          "channel": 7
+        }
+      ]
+    },
+    {
+      "trigger": {
+        "type": "midi_pitchwheel",
+        "channel": 8
+      },
+      "action": {
+        "type": "master_fader_move"
+      },
+      "outputs": [
+        {
+          "type": "osc",
+          "addr": "/eos/user/1/fader/1/10",
+          "arg_type": "float"
+        },
+        {
+          "type": "midi_pitchwheel",
+          "channel": 8
+        }
+      ]
+    }
+  ]
 }

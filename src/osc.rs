@@ -137,33 +137,41 @@ impl OscServer {
                         let eos_bank_size = m.profile.eos_bank_size;
                         if f_num <= eos_bank_size {
                             let pitch = (val * 16383.0).round() as i16 - 8192;
-                            // Only update physical pitchwheel if it exists
-                            if f_num <= m.profile.fader_count {
-                                m.enqueue_pitchwheel((f_num - 1) as u8, pitch);
-                            }
+                            // Update physical pitchwheel if a mapping exists for this fader index
+                            m.enqueue_pitchwheel((f_num - 1) as u8, pitch);
                             m.fader_levels[f_num - 1] = *val;
                         }
                     }
                 }
             } else if msg.addr == "/eos/out/event/cue/1/0/stop" {
                 let mut m = midi.lock().unwrap();
-                // If the fader was currently moving (Go or GoBack), set to Pause
                 if m.crossfade_state == CrossfadeState::Go
                     || m.crossfade_state == CrossfadeState::GoBack
                 {
                     m.crossfade_state = CrossfadeState::Pause;
-                    let stop_note = m.profile.buttons.stop_note;
-                    m.send_queue.enqueue(vec![0x90, stop_note, 127]); // Ensure Stop LED is Solid On
+                    if let Some((note, chan, _)) = m
+                        .profile
+                        .get_midi_output_for_action(crate::controller::LogicalAction::Stop)
+                    {
+                        m.send_queue.enqueue(vec![0x90 | chan, note, 127]);
+                    }
                 }
             } else if msg.addr == "/eos/out/event/cue/1/0/resume" {
                 let mut m = midi.lock().unwrap();
                 if m.crossfade_state == CrossfadeState::Pause {
-                    // Resume the 'Go' state so the Play button stops flashing and stays solid
                     m.crossfade_state = CrossfadeState::Go;
-                    let stop_note = m.profile.buttons.stop_note;
-                    let go_note = m.profile.buttons.go_note;
-                    m.send_queue.enqueue(vec![0x90, stop_note, 0]); // Stop LED Off
-                    m.send_queue.enqueue(vec![0x90, go_note, 127]); // Go LED Solid
+                    if let Some((s_note, s_chan, _)) = m
+                        .profile
+                        .get_midi_output_for_action(crate::controller::LogicalAction::Stop)
+                    {
+                        m.send_queue.enqueue(vec![0x90 | s_chan, s_note, 0]);
+                    }
+                    if let Some((g_note, g_chan, _)) = m
+                        .profile
+                        .get_midi_output_for_action(crate::controller::LogicalAction::Go)
+                    {
+                        m.send_queue.enqueue(vec![0x90 | g_chan, g_note, 127]);
+                    }
                 }
             } else if msg.addr == "/eos/out/active/cue/text" {
                 if let Some(OscType::String(text)) = msg.args.first() {
@@ -189,13 +197,11 @@ impl OscServer {
                                         m.crossfade_state = CrossfadeState::GoBack;
                                     }
                                 } else {
-                                    // First cue received, assume Go
                                     m.crossfade_state = CrossfadeState::Go;
                                 }
                             }
 
                             m.current_cue = Some(new_cue_num);
-                            debug!("Current Cue updated to: {:?}", m.current_cue);
                         }
                     }
                 }
@@ -218,7 +224,6 @@ impl OscServer {
                     };
                     let midi_clone = Arc::clone(midi);
                     tokio::spawn(async move {
-                        // Request fader config based on profile's fader count
                         let eos_bank_size = {
                             let m = midi_clone.lock().unwrap();
                             m.profile.eos_bank_size
@@ -239,33 +244,46 @@ impl OscServer {
                     let mut m = midi.lock().unwrap();
 
                     if *progress < 1.0 {
+                        let go_fb = m
+                            .profile
+                            .get_midi_output_for_action(crate::controller::LogicalAction::Go);
+                        let stop_fb = m
+                            .profile
+                            .get_midi_output_for_action(crate::controller::LogicalAction::Stop);
+
                         match m.crossfade_state {
                             CrossfadeState::Go => {
-                                let go_note = m.profile.buttons.go_note;
-                                let stop_note = m.profile.buttons.stop_note;
-                                m.send_queue.enqueue(vec![0x90, go_note, 127]);
-                                m.send_queue.enqueue(vec![0x90, stop_note, 0]);
+                                if let Some((n, c, v)) = go_fb {
+                                    m.send_queue.enqueue(vec![0x90 | c, n, v]);
+                                }
+                                if let Some((n, c, _)) = stop_fb {
+                                    m.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                                }
                             }
-                            CrossfadeState::GoBack => {
-                                let go_note = m.profile.buttons.go_note;
-                                let stop_note = m.profile.buttons.stop_note;
-                                m.send_queue.enqueue(vec![0x90, stop_note, 127]);
-                                m.send_queue.enqueue(vec![0x90, go_note, 0]);
-                            }
-                            CrossfadeState::Pause => {
-                                let go_note = m.profile.buttons.go_note;
-                                let stop_note = m.profile.buttons.stop_note;
-                                m.send_queue.enqueue(vec![0x90, stop_note, 127]);
-                                m.send_queue.enqueue(vec![0x90, go_note, 0]);
+                            CrossfadeState::GoBack | CrossfadeState::Pause => {
+                                if let Some((n, c, v)) = stop_fb {
+                                    m.send_queue.enqueue(vec![0x90 | c, n, v]);
+                                }
+                                if let Some((n, c, _)) = go_fb {
+                                    m.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                                }
                             }
                             CrossfadeState::Inactive => {}
                         }
                     } else {
-                        let go_note = m.profile.buttons.go_note;
-                        let stop_note = m.profile.buttons.stop_note;
+                        let go_fb = m
+                            .profile
+                            .get_midi_output_for_action(crate::controller::LogicalAction::Go);
+                        let stop_fb = m
+                            .profile
+                            .get_midi_output_for_action(crate::controller::LogicalAction::Stop);
                         m.crossfade_state = CrossfadeState::Inactive;
-                        m.send_queue.enqueue(vec![0x90, go_note, 0]); // Go LED Off
-                        m.send_queue.enqueue(vec![0x90, stop_note, 0]); // Stop LED Off
+                        if let Some((n, c, _)) = go_fb {
+                            m.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                        }
+                        if let Some((n, c, _)) = stop_fb {
+                            m.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                        }
                     }
                 }
             }

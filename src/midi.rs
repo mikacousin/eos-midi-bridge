@@ -51,12 +51,22 @@ impl Midi {
     }
 
     pub fn enqueue_pitchwheel(&self, fader_index: u8, value: i16) {
-        if let Some(&channel) = self.profile.fader_channels.get(fader_index as usize) {
-            let val = (value + 8192) as u16; // Convert pitch (-8192 to 8191) to 0-16383 range
-            let mut data = vec![0xE0 | channel];
-            data.push((val & 0x7F) as u8); // LSB
-            data.push(((val >> 7) & 0x7F) as u8); // MSB
-            self.send_queue.enqueue(data);
+        // Find a mapping for FaderMove { index: fader_index } that has a MidiPitchwheel output
+        for mapping in &self.profile.mappings {
+            if let crate::controller::LogicalAction::FaderMove { index } = mapping.action {
+                if index == fader_index as usize {
+                    for output in &mapping.outputs {
+                        if let crate::controller::Output::MidiPitchwheel { channel } = output {
+                            let val = (value + 8192) as u16; // Convert pitch (-8192 to 8191) to 0-16383 range
+                            let mut data = vec![0xE0 | channel];
+                            data.push((val & 0x7F) as u8); // LSB
+                            data.push(((val >> 7) & 0x7F) as u8); // MSB
+                            self.send_queue.enqueue(data);
+                            return;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -116,9 +126,14 @@ impl Midi {
         for line in 0..self.profile.display.line_offsets.len() {
             self.send_lcd(&" ".repeat(len), line as u8);
         }
-        for i in 0..self.profile.fader_count {
-            self.enqueue_pitchwheel(i as u8, -8192);
+
+        // Reset all physical faders found in mappings
+        for mapping in &self.profile.mappings {
+            if let crate::controller::LogicalAction::FaderMove { index } = mapping.action {
+                self.enqueue_pitchwheel(index as u8, -8192);
+            }
         }
+
         for note in 0..128 {
             self.send_queue.enqueue(vec![0x90, note, 0]);
         }
@@ -140,126 +155,199 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                 (m.osc_client.clone(), m.profile.clone())
             };
 
-            match msg_type {
+            // Identify the trigger
+            let trigger = match msg_type {
                 0x90 => {
-                    // d2 == 127 is Press, d2 == 0 is Release
-                    let is_pressed = d2 == 127;
+                    let mode = if d2 == 127 {
+                        crate::controller::MidiTriggerMode::Press
+                    } else {
+                        crate::controller::MidiTriggerMode::Release
+                    };
+                    Some(crate::controller::Trigger::MidiNote {
+                        note: d1,
+                        channel: chan,
+                        mode,
+                    })
+                }
+                0xB0 => Some(crate::controller::Trigger::MidiCc {
+                    cc: d1,
+                    channel: chan,
+                }),
+                0xE0 => Some(crate::controller::Trigger::MidiPitchwheel { channel: chan }),
+                _ => None,
+            };
 
-                    if d1 == profile.buttons.go_note {
-                        // GO Button
-                        if is_pressed {
-                            let _ = client.send("/eos/user/1/key/go_0", vec![]).await;
+            let trigger = match trigger {
+                Some(t) => t,
+                None => return,
+            };
+
+            // Find matching mappings
+            for mapping in &profile.mappings {
+                let matches = match (&mapping.trigger, &trigger) {
+                    (
+                        crate::controller::Trigger::MidiNote {
+                            note: n1,
+                            channel: c1,
+                            mode: m1,
+                        },
+                        crate::controller::Trigger::MidiNote {
+                            note: n2,
+                            channel: c2,
+                            mode: m2,
+                        },
+                    ) => {
+                        n1 == n2
+                            && c1 == c2
+                            && (*m1 == crate::controller::MidiTriggerMode::Both || m1 == m2)
+                    }
+                    (
+                        crate::controller::Trigger::MidiCc {
+                            cc: cc1,
+                            channel: c1,
+                        },
+                        crate::controller::Trigger::MidiCc {
+                            cc: cc2,
+                            channel: c2,
+                        },
+                    ) => cc1 == cc2 && c1 == c2,
+                    (
+                        crate::controller::Trigger::MidiPitchwheel { channel: c1 },
+                        crate::controller::Trigger::MidiPitchwheel { channel: c2 },
+                    ) => c1 == c2,
+                    _ => false,
+                };
+
+                if matches {
+                    // Logic Action Processing
+                    match &mapping.action {
+                        crate::controller::LogicalAction::Go => {
                             let mut m = midi.lock().unwrap();
                             m.crossfade_state = CrossfadeState::Go;
-                            m.send_queue
-                                .enqueue(vec![0x90, profile.buttons.go_note, 127]); // LED On
-                            m.send_queue
-                                .enqueue(vec![0x90, profile.buttons.stop_note, 0]); // Ensure Stop LED Off
                         }
-                    } else if d1 == profile.buttons.stop_note {
-                        // STOP / GoBack Button
-                        if is_pressed {
-                            let _ = client.send("/eos/user/1/key/stop", vec![]).await;
-                            // Turn LED ON immediately
+                        crate::controller::LogicalAction::Stop => {
                             let mut m = midi.lock().unwrap();
                             if m.crossfade_state == CrossfadeState::Go {
                                 m.crossfade_state = CrossfadeState::Pause;
-                                m.send_queue
-                                    .enqueue(vec![0x90, profile.buttons.stop_note, 127]);
                             } else {
                                 m.crossfade_state = CrossfadeState::GoBack;
-                                m.send_queue
-                                    .enqueue(vec![0x90, profile.buttons.stop_note, 127]);
-                                m.send_queue.enqueue(vec![0x90, profile.buttons.go_note, 0]);
                             }
                         }
-                    } else if (d1 == profile.buttons.page_up_note
-                        || d1 == profile.buttons.page_down_note)
-                        && is_pressed
-                    {
-                        // Page Up / Down
-                        let (new_page, display_duration, bank_size) = {
+                        crate::controller::LogicalAction::Resume => {
                             let mut m = midi.lock().unwrap();
-                            if d1 == profile.buttons.page_down_note {
-                                m.fader_page = if m.fader_page >= 99 {
-                                    1
+                            m.crossfade_state = CrossfadeState::Go;
+                        }
+                        crate::controller::LogicalAction::FaderPageUp
+                        | crate::controller::LogicalAction::FaderPageDown => {
+                            let (new_page, display_duration, bank_size) = {
+                                let mut m = midi.lock().unwrap();
+                                if let crate::controller::LogicalAction::FaderPageDown =
+                                    mapping.action
+                                {
+                                    m.fader_page = if m.fader_page >= 99 {
+                                        1
+                                    } else {
+                                        m.fader_page + 1
+                                    };
                                 } else {
-                                    m.fader_page + 1
-                                };
-                            } else {
-                                m.fader_page = if m.fader_page <= 1 {
-                                    99
-                                } else {
-                                    m.fader_page - 1
-                                };
-                            }
-                            m.last_page_change = time::Instant::now(); // Mark the start of the 1s window
-                            m.show_page_number(m.fader_page);
-                            (m.fader_page, m.page_display_time, profile.eos_bank_size)
-                        };
+                                    m.fader_page = if m.fader_page <= 1 {
+                                        99
+                                    } else {
+                                        m.fader_page - 1
+                                    };
+                                }
+                                m.last_page_change = time::Instant::now();
+                                m.show_page_number(m.fader_page);
+                                (m.fader_page, m.page_display_time, profile.eos_bank_size)
+                            };
 
-                        let client_clone = client.clone();
-
-                        // Spawn a timer task
-                        tokio::spawn(async move {
-                            // Send the config to Eos immediately
-                            let _ = client_clone
-                                .send(
-                                    &format!(
-                                        "/eos/user/1/fader/1/config/{}/{}",
-                                        new_page, bank_size
-                                    ),
-                                    vec![],
-                                )
-                                .await;
-
-                            // Wait for 1 second
-                            time::sleep(display_duration).await;
-
-                            // Request fader names again to refresh the LCD and remove the Page message
-                            let _ = client_clone
-                                .send(
-                                    &format!(
-                                        "/eos/user/1/fader/1/config/{}/{}",
-                                        new_page, bank_size
-                                    ),
-                                    vec![],
-                                )
-                                .await;
-                        });
-                    }
-                }
-                0xE0 => {
-                    // Pitch Wheel (Fader Movement)
-                    let value = ((d2 as i16) << 7) | (d1 as i16); // This is the 0-16383 value
-                    let pitch = value - 8192; // Convert to -8192 to 8191 range
-                    let f_val = (value as f32) / 16383.0; // Normalized 0.0 to 1.0
-
-                    let mut m = midi.lock().unwrap();
-                    // Map MIDI channel to fader index using profile
-                    if let Some(fader_idx) =
-                        m.profile.fader_channels.iter().position(|&x| x == chan)
-                    {
-                        // Echo the value back to the controller immediately
-                        m.enqueue_pitchwheel(fader_idx as u8, pitch);
-
-                        if fader_idx < m.profile.eos_bank_size {
-                            m.fader_levels[fader_idx] = f_val;
-
-                            // Send to Eos: /eos/user/1/fader/1/{index}
                             let client_clone = client.clone();
                             tokio::spawn(async move {
                                 let _ = client_clone
                                     .send(
-                                        &format!("/eos/user/1/fader/1/{}", fader_idx + 1),
-                                        vec![rosc::OscType::Float(f_val)],
+                                        &format!(
+                                            "/eos/user/1/fader/1/config/{}/{}",
+                                            new_page, bank_size
+                                        ),
+                                        vec![],
+                                    )
+                                    .await;
+                                time::sleep(display_duration).await;
+                                let _ = client_clone
+                                    .send(
+                                        &format!(
+                                            "/eos/user/1/fader/1/config/{}/{}",
+                                            new_page, bank_size
+                                        ),
+                                        vec![],
                                     )
                                     .await;
                             });
                         }
+                        crate::controller::LogicalAction::FaderMove { index } => {
+                            let value = ((d2 as i16) << 7) | (d1 as i16);
+                            let f_val = (value as f32) / 16383.0;
+                            let mut m = midi.lock().unwrap();
+                            if *index < m.fader_levels.len() {
+                                m.fader_levels[*index] = f_val;
+                                // We don't echo back here usually, but if the user wants it, they add a MidiPitchwheel output
+                            }
+                        }
+                        crate::controller::LogicalAction::MasterFaderMove => {
+                            // Similar logic for master fader
+                        }
+                    }
+
+                    // Output Processing
+                    for output in &mapping.outputs {
+                        match output {
+                            crate::controller::Output::Osc { addr, arg_type } => {
+                                let client_clone = client.clone();
+                                let addr = addr.clone();
+                                let arg_type = arg_type.clone();
+
+                                // For Faders, we need the value
+                                let arg =
+                                    if let crate::controller::LogicalAction::FaderMove { .. } =
+                                        mapping.action
+                                    {
+                                        let value = ((d2 as i16) << 7) | (d1 as i16);
+                                        let f_val = (value as f32) / 16383.0;
+                                        Some(rosc::OscType::Float(f_val))
+                                    } else {
+                                        None
+                                    };
+
+                                tokio::spawn(async move {
+                                    if arg_type == "float" {
+                                        if let Some(a) = arg {
+                                            let _ = client_clone.send(&addr, vec![a]).await;
+                                        }
+                                    } else {
+                                        let _ = client_clone.send(&addr, vec![]).await;
+                                    }
+                                });
+                            }
+                            crate::controller::Output::MidiNote {
+                                note,
+                                channel,
+                                velocity,
+                            } => {
+                                let m = midi.lock().unwrap();
+                                m.send_queue.enqueue(vec![0x90 | channel, *note, *velocity]);
+                            }
+                            crate::controller::Output::MidiPitchwheel { channel } => {
+                                let value = ((d2 as i16) << 7) | (d1 as i16);
+                                let m = midi.lock().unwrap();
+                                let mut data = vec![0xE0 | channel];
+                                data.push((value & 0x7F) as u8);
+                                data.push(((value >> 7) & 0x7F) as u8);
+                                m.send_queue.enqueue(data);
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                _ => {}
             }
         }
     }

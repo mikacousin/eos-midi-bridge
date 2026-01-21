@@ -1,6 +1,6 @@
-use crate::config::{BridgeConfig, store_config};
+use crate::config::{store_config, BridgeConfig};
 use eframe::egui;
-use eos_midi_bridge::{SystemCommand, midi::Midi};
+use eos_midi_bridge::{midi::Midi, SystemCommand};
 use log::{error, warn};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -14,6 +14,9 @@ pub struct BridgeApp {
     pub controller_profile_edit: String,
     pub tx_system: mpsc::Sender<SystemCommand>,
     pub file_dialog: egui_file_dialog::FileDialog,
+    pub show_node_graph: bool,
+    pub snarl: egui_snarl::Snarl<eos_midi_bridge::nodes::NodeData>,
+    pub snarl_zoom_pending: f32,
 }
 
 impl BridgeApp {
@@ -31,6 +34,9 @@ impl BridgeApp {
             status_message: "Ready".to_string(),
             tx_system,
             file_dialog: egui_file_dialog::FileDialog::new(),
+            show_node_graph: false,
+            snarl: egui_snarl::Snarl::new(),
+            snarl_zoom_pending: 1.0,
         }
     }
 }
@@ -38,8 +44,9 @@ impl BridgeApp {
 impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            let mut populate_needed = None;
             ui.horizontal(|ui| {
-                ui.heading("Eos Mackie Bridge Settings");
+                ui.heading("Eos Mackie Bridge");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (status_text, color) = if let Ok(m) = self.midi.lock() {
@@ -68,104 +75,123 @@ impl eframe::App for BridgeApp {
                 });
             });
             ui.separator();
+            ui.heading("Settings");
+            ui.add_space(5.0);
 
-            egui::Grid::new("config_grid")
-                .num_columns(2)
-                .spacing([40.0, 10.0])
-                .show(ui, |ui| {
-                    ui.label("Eos IP:");
-                    if ui.text_edit_singleline(&mut self.eos_ip_edit).changed() {
-                        self.config_edit.eos_ip = self.eos_ip_edit.clone();
-                    }
-                    ui.end_row();
-
-                    ui.label("Eos OSC Port:");
-                    ui.add(egui::DragValue::new(&mut self.config_edit.eos_osc_port));
-                    ui.end_row();
-
-                    ui.label("Bridge Listen Port:");
-                    ui.add(egui::DragValue::new(
-                        &mut self.config_edit.bridge_listen_port,
-                    ));
-                    ui.end_row();
-
-                    if let Ok(m) = self.midi.lock() {
-                        ui.label("MIDI Input:");
-                        let mut selected_in = self.config_edit.midi_in_name.clone();
-
-                        // Only reset to None if we actually have ports and the selected one is missing
-                        if let Some(ref name) = selected_in {
-                            if !m.available_in_ports.is_empty()
-                                && !m.available_in_ports.contains(name)
-                            {
-                                selected_in = None;
+            ui.columns(2, |columns| {
+                // Left Column: OSC Settings
+                columns[0].vertical(|ui| {
+                    ui.strong("🌐 OSC Settings");
+                    ui.add_space(10.0);
+                    egui::Grid::new("osc_grid")
+                        .num_columns(2)
+                        .spacing([10.0, 10.0])
+                        .show(ui, |ui| {
+                            ui.label("Eos IP:");
+                            if ui.text_edit_singleline(&mut self.eos_ip_edit).changed() {
+                                self.config_edit.eos_ip = self.eos_ip_edit.clone();
                             }
-                        }
+                            ui.end_row();
 
-                        let display_in = selected_in.as_deref().unwrap_or("None");
+                            ui.label("Eos OSC Port:");
+                            ui.add(egui::DragValue::new(&mut self.config_edit.eos_osc_port));
+                            ui.end_row();
 
-                        egui::ComboBox::from_id_salt("midi_in_select")
-                            .selected_text(display_in)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut selected_in, None, "None");
-                                for port in &m.available_in_ports {
-                                    ui.selectable_value(&mut selected_in, Some(port.clone()), port);
-                                }
-                            });
-                        self.config_edit.midi_in_name = selected_in;
-                        ui.end_row();
-
-                        ui.label("MIDI Output:");
-                        let mut selected_out = self.config_edit.midi_out_name.clone();
-
-                        // Only reset to None if we actually have ports and the selected one is missing
-                        if let Some(ref name) = selected_out {
-                            if !m.available_out_ports.is_empty()
-                                && !m.available_out_ports.contains(name)
-                            {
-                                selected_out = None;
-                            }
-                        }
-
-                        let display_out = selected_out.as_deref().unwrap_or("None");
-
-                        egui::ComboBox::from_id_salt("midi_out_select")
-                            .selected_text(display_out)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut selected_out, None, "None");
-                                for port in &m.available_out_ports {
-                                    ui.selectable_value(
-                                        &mut selected_out,
-                                        Some(port.clone()),
-                                        port,
-                                    );
-                                }
-                            });
-                        self.config_edit.midi_out_name = selected_out;
-                        ui.end_row();
-                    }
-
-                    ui.label("Controller Profile:");
-                    ui.horizontal(|ui| {
-                        let controller_name = if let Ok(m) = self.midi.lock() {
-                            m.profile.name.clone()
-                        } else {
-                            "Unknown".to_string()
-                        };
-                        ui.label(egui::RichText::new(controller_name).strong());
-
-                        if ui.button("📂 Change...").clicked() {
-                            self.file_dialog.pick_file();
-                        }
-                    });
-
-                    if let Some(path) = self.file_dialog.update(ctx).picked() {
-                        let path_str = path.to_string_lossy().to_string();
-                        self.controller_profile_edit = path_str.clone();
-                        self.config_edit.controller_profile = path_str;
-                    }
-                    ui.end_row();
+                            ui.label("Bridge Listen Port:");
+                            ui.add(egui::DragValue::new(
+                                &mut self.config_edit.bridge_listen_port,
+                            ));
+                            ui.end_row();
+                        });
                 });
+
+                // Right Column: MIDI Settings
+                columns[1].vertical(|ui| {
+                    ui.strong("🎹 MIDI & Profile Settings");
+                    ui.add_space(10.0);
+                    egui::Grid::new("midi_grid")
+                        .num_columns(2)
+                        .spacing([10.0, 10.0])
+                        .show(ui, |ui| {
+                            if let Ok(m) = self.midi.lock() {
+                                ui.label("MIDI Input:");
+                                let mut selected_in = self.config_edit.midi_in_name.clone();
+                                if let Some(ref name) = selected_in {
+                                    if !m.available_in_ports.is_empty()
+                                        && !m.available_in_ports.contains(name)
+                                    {
+                                        selected_in = None;
+                                    }
+                                }
+                                let display_in = selected_in.as_deref().unwrap_or("None");
+                                egui::ComboBox::from_id_salt("midi_in_select")
+                                    .selected_text(display_in)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut selected_in, None, "None");
+                                        for port in &m.available_in_ports {
+                                            ui.selectable_value(
+                                                &mut selected_in,
+                                                Some(port.clone()),
+                                                port,
+                                            );
+                                        }
+                                    });
+                                self.config_edit.midi_in_name = selected_in;
+                                ui.end_row();
+
+                                ui.label("MIDI Output:");
+                                let mut selected_out = self.config_edit.midi_out_name.clone();
+                                if let Some(ref name) = selected_out {
+                                    if !m.available_out_ports.is_empty()
+                                        && !m.available_out_ports.contains(name)
+                                    {
+                                        selected_out = None;
+                                    }
+                                }
+                                let display_out = selected_out.as_deref().unwrap_or("None");
+                                egui::ComboBox::from_id_salt("midi_out_select")
+                                    .selected_text(display_out)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut selected_out, None, "None");
+                                        for port in &m.available_out_ports {
+                                            ui.selectable_value(
+                                                &mut selected_out,
+                                                Some(port.clone()),
+                                                port,
+                                            );
+                                        }
+                                    });
+                                self.config_edit.midi_out_name = selected_out;
+                                ui.end_row();
+
+                                ui.label("Controller Profile:");
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&m.profile.name).strong());
+                                    if ui.button("📂 Change...").clicked() {
+                                        self.file_dialog.pick_file();
+                                    }
+                                    if ui.button("🕸 Graph").clicked() {
+                                        self.show_node_graph = !self.show_node_graph;
+                                        if self.show_node_graph {
+                                            populate_needed = Some(m.profile.clone());
+                                        }
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        });
+                });
+
+                if let Some(profile) = populate_needed {
+                    self.populate_snarl(&profile);
+                }
+            });
+
+            if let Some(path) = self.file_dialog.update(ctx).picked() {
+                let path_str = path.to_string_lossy().to_string();
+                self.controller_profile_edit = path_str.clone();
+                self.config_edit.controller_profile = path_str;
+            }
 
             ui.add_space(20.0);
 
@@ -193,23 +219,6 @@ impl eframe::App for BridgeApp {
                         self.last_applied_config = self.config_edit.clone();
                         self.status_message = "Settings applied".to_string();
                     }
-                }
-            }
-
-            ui.separator();
-
-            // Live Status from the Arc<Mutex<Midi>>
-            match self.midi.lock() {
-                Ok(m) => {
-                    if let Some(cue) = m.current_cue {
-                        ui.label(format!("Active Cue: {:.2}", cue));
-                    } else {
-                        ui.label("Active Cue: --");
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to lock MIDI state for display: {}", e);
-                    ui.label("⚠ Unable to read current cue");
                 }
             }
 
@@ -281,8 +290,39 @@ impl eframe::App for BridgeApp {
                 }
             }
 
+            // --- Active Cue Display (New Location) ---
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(5.0);
+
+            ui.vertical_centered(|ui| {
+                match self.midi.lock() {
+                    Ok(m) => {
+                        let cue_text = if let Some(cue) = m.current_cue {
+                            format!("ACTIVE CUE: {:.2}", cue)
+                        } else {
+                            "ACTIVE CUE: --".to_string()
+                        };
+
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(cue_text).heading().strong().color(
+                                if m.current_cue.is_some() {
+                                    egui::Color32::from_rgb(255, 215, 0) // Gold
+                                } else {
+                                    egui::Color32::GRAY
+                                },
+                            ),
+                        ));
+                    }
+                    Err(e) => {
+                        warn!("Failed to lock MIDI state for cue display: {}", e);
+                        ui.label("⚠ Unable to read cue");
+                    }
+                }
+            });
+
             // Status message en bas de la fenêtre
-            ui.add_space(20.0);
+            ui.add_space(10.0);
             ui.separator();
             ui.horizontal(|ui| {
                 if let Ok(m) = self.midi.lock() {
@@ -293,7 +333,95 @@ impl eframe::App for BridgeApp {
             });
         });
 
+        // --- Node Graph Window ---
+        if self.show_node_graph {
+            let mut open = self.show_node_graph;
+            egui::Window::new("Advanced Node Graph")
+                .open(&mut open)
+                .default_size([800.0, 600.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("➕").on_hover_text("Zoom In").clicked() {
+                            self.snarl_zoom_pending *= 1.25;
+                            self.status_message = "Zoom In clicked".to_string();
+                        }
+                        if ui.button("➖").on_hover_text("Zoom Out").clicked() {
+                            self.snarl_zoom_pending *= 0.8;
+                            self.status_message = "Zoom Out clicked".to_string();
+                        }
+                        ui.separator();
+                        ui.label("Zoom: Scroll or use buttons");
+                    });
+
+                    ui.separator();
+
+                    let snarl_rect = ui.available_rect_before_wrap();
+                    let mut viewer = eos_midi_bridge::nodes::NodeGraphViewer {
+                        zoom_delta: self.snarl_zoom_pending,
+                        zoom_center: Some(snarl_rect.center()),
+                    };
+
+                    self.snarl.show(
+                        &mut viewer,
+                        &egui_snarl::ui::SnarlStyle::default(),
+                        egui::Id::new("snarl_graph"),
+                        ui,
+                    );
+
+                    self.snarl_zoom_pending = 1.0;
+                });
+            self.show_node_graph = open;
+        }
+
         // Request repaint at a reasonable rate (30 FPS) instead of constantly
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
+    }
+}
+
+impl BridgeApp {
+    fn populate_snarl(&mut self, profile: &eos_midi_bridge::controller::ControllerProfile) {
+        use eos_midi_bridge::nodes::NodeData;
+        self.snarl = egui_snarl::Snarl::new();
+
+        for (m_idx, mapping) in profile.mappings.iter().enumerate() {
+            let y_base = m_idx as f32 * 150.0;
+
+            let trigger_id = self.snarl.insert_node(
+                egui::pos2(50.0, y_base + 50.0),
+                NodeData::Trigger(mapping.trigger.clone()),
+            );
+            let action_id = self.snarl.insert_node(
+                egui::pos2(300.0, y_base + 50.0),
+                NodeData::Action(mapping.action.clone()),
+            );
+
+            self.snarl.connect(
+                egui_snarl::OutPinId {
+                    node: trigger_id,
+                    output: 0,
+                },
+                egui_snarl::InPinId {
+                    node: action_id,
+                    input: 0,
+                },
+            );
+
+            for (i, output) in mapping.outputs.iter().enumerate() {
+                let output_id = self.snarl.insert_node(
+                    egui::pos2(550.0, y_base + i as f32 * 60.0),
+                    NodeData::Output(output.clone()),
+                );
+                self.snarl.connect(
+                    egui_snarl::OutPinId {
+                        node: action_id,
+                        output: 0,
+                    },
+                    egui_snarl::InPinId {
+                        node: output_id,
+                        input: 0,
+                    },
+                );
+            }
+        }
     }
 }
