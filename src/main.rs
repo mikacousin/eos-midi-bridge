@@ -292,7 +292,9 @@ fn main() -> anyhow::Result<()> {
 
     // Launch the GUI
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 510.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([840.0, 510.0])
+            .with_maximized(true),
         ..Default::default()
     };
     let app_midi = midi.clone();

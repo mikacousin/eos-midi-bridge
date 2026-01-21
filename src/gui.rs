@@ -7,9 +7,9 @@ use tokio::sync::mpsc;
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
+    NodeGraph,
     Console,
     Settings,
-    NodeGraph,
 }
 
 pub struct BridgeApp {
@@ -48,7 +48,7 @@ impl BridgeApp {
             status_message: "Ready".to_string(),
             tx_system,
             file_dialog: egui_file_dialog::FileDialog::new(),
-            active_tab: Tab::Console,
+            active_tab: Tab::NodeGraph,
             snarl: egui_snarl::Snarl::new(),
             snarl_zoom_pending: 1.0,
             mapping_nodes: std::collections::HashMap::new(),
@@ -155,9 +155,9 @@ impl eframe::App for BridgeApp {
 
             // Tab Navigation
             ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.active_tab, Tab::NodeGraph, "🕸 Node Graph");
                 ui.selectable_value(&mut self.active_tab, Tab::Console, "🎛 Console");
                 ui.selectable_value(&mut self.active_tab, Tab::Settings, "⚙ Settings");
-                ui.selectable_value(&mut self.active_tab, Tab::NodeGraph, "🕸 Node Graph");
             });
 
             ui.separator();
@@ -482,17 +482,27 @@ impl BridgeApp {
         self.snarl = egui_snarl::Snarl::new();
         self.mapping_nodes.clear();
 
+        let total_mappings = profile.mappings.len();
+        let split_idx = (total_mappings + 1) / 2;
+
         for (m_idx, mapping) in profile.mappings.iter().enumerate() {
-            let y_base = m_idx as f32 * 150.0;
+            let (col_idx, row_idx) = if m_idx < split_idx {
+                (0, m_idx)
+            } else {
+                (1, m_idx - split_idx)
+            };
+
+            let x_base = col_idx as f32 * 800.0;
+            let y_base = row_idx as f32 * 150.0;
 
             let trigger_id = self.snarl.insert_node(
-                egui::pos2(50.0, y_base + 50.0),
+                egui::pos2(x_base + 50.0, y_base + 50.0),
                 NodeData::Trigger(mapping.trigger.clone(), Default::default()),
             );
             self.snarl.open_node(trigger_id, true);
 
             let action_id = self.snarl.insert_node(
-                egui::pos2(300.0, y_base + 50.0),
+                egui::pos2(x_base + 300.0, y_base + 50.0),
                 NodeData::Action(mapping.action.clone(), Default::default()),
             );
             self.snarl.open_node(action_id, true);
@@ -512,7 +522,7 @@ impl BridgeApp {
 
             for (i, output) in mapping.outputs.iter().enumerate() {
                 let output_id = self.snarl.insert_node(
-                    egui::pos2(550.0, y_base + i as f32 * 60.0),
+                    egui::pos2(x_base + 550.0, y_base + i as f32 * 60.0),
                     NodeData::Output(output.clone(), Default::default()),
                 );
                 self.snarl.open_node(output_id, true);
