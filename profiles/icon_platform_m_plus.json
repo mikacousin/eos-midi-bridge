@@ -83,7 +83,7 @@
         "mode": "press"
       },
       "action": {
-        "type": "fader_page_up"
+        "type": "fader_page_down"
       },
       "outputs": [
         {
@@ -107,7 +107,7 @@
         "mode": "press"
       },
       "action": {
-        "type": "fader_page_down"
+        "type": "fader_page_up"
       },
       "outputs": [
         {

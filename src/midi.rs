@@ -116,7 +116,7 @@ impl Midi {
 
         let page_text = format!("Page {}", page);
         // Center the text
-        let centered_text = format!("{:^len$}", page_text, len = len);
+        let centered_text = crate::center_text(&page_text, len);
 
         if self.profile.display.line_offsets.len() > 1 {
             let start = self.profile.display.line_offsets[1];
@@ -151,37 +151,45 @@ impl Midi {
 
         // Helper to check if a message matches a Note output
         let matches_note = |msg: &[u8], channel: u8, note: u8| -> bool {
-            if msg.len() < 3 { return false; }
+            if msg.len() < 3 {
+                return false;
+            }
             let status = msg[0] & 0xF0;
             let msg_channel = msg[0] & 0x0F;
-            if msg_channel != channel { return false; }
-            if msg[1] != note { return false; }
+            if msg_channel != channel {
+                return false;
+            }
+            if msg[1] != note {
+                return false;
+            }
             status == 0x90 || status == 0x80 // Note On or Note Off
         };
 
         // Helper to check if a message matches a PitchWheel output
         let matches_pitch = |msg: &[u8], channel: u8| -> bool {
-             if msg.len() < 3 { return false; }
-             let status = msg[0] & 0xF0;
-             let msg_channel = msg[0] & 0x0F;
-             status == 0xE0 && msg_channel == channel
+            if msg.len() < 3 {
+                return false;
+            }
+            let status = msg[0] & 0xF0;
+            let msg_channel = msg[0] & 0x0F;
+            status == 0xE0 && msg_channel == channel
         };
 
         for (idx, mapping) in self.profile.mappings.iter().enumerate() {
             for (out_idx, output) in mapping.outputs.iter().enumerate() {
-                 let matched = match output {
-                     crate::controller::Output::MidiNote { channel, note, .. } => {
-                         matches_note(msg, *channel, *note)
-                     }
-                     crate::controller::Output::MidiPitchwheel { channel } => {
-                         matches_pitch(msg, *channel)
-                     }
-                     _ => false,
-                 };
+                let matched = match output {
+                    crate::controller::Output::MidiNote { channel, note, .. } => {
+                        matches_note(msg, *channel, *note)
+                    }
+                    crate::controller::Output::MidiPitchwheel { channel } => {
+                        matches_pitch(msg, *channel)
+                    }
+                    _ => false,
+                };
 
-                 if matched {
-                     results.push((idx, crate::ActivityPart::Output(out_idx)));
-                 }
+                if matched {
+                    results.push((idx, crate::ActivityPart::Output(out_idx)));
+                }
             }
         }
         results
@@ -190,15 +198,19 @@ impl Midi {
         if !force && self.crossfade_state == new_state {
             return;
         }
-        
+
         // Reset blink state whenever we switch states to ensure clean slate
         if new_state != crate::CrossfadeState::Pause {
             self.blink_state = false;
         }
         self.crossfade_state = new_state;
 
-        let go_fb = self.profile.get_midi_output_for_action(crate::controller::LogicalAction::Go);
-        let stop_fb = self.profile.get_midi_output_for_action(crate::controller::LogicalAction::Stop);
+        let go_fb = self
+            .profile
+            .get_midi_output_for_action(crate::controller::LogicalAction::Go);
+        let stop_fb = self
+            .profile
+            .get_midi_output_for_action(crate::controller::LogicalAction::Stop);
 
         match self.crossfade_state {
             crate::CrossfadeState::Go => {
@@ -231,9 +243,11 @@ impl Midi {
     pub fn tick_blink(&mut self) {
         if self.crossfade_state == crate::CrossfadeState::Pause {
             self.blink_state = !self.blink_state;
-            
-            let go_fb = self.profile.get_midi_output_for_action(crate::controller::LogicalAction::Go);
-            
+
+            let go_fb = self
+                .profile
+                .get_midi_output_for_action(crate::controller::LogicalAction::Go);
+
             if let Some((n, c, _)) = go_fb {
                 let v = if self.blink_state { 127 } else { 0 };
                 self.send_queue.enqueue(vec![0x90 | c, n, v]);
@@ -402,19 +416,13 @@ pub async fn execute_mapping(
         | crate::controller::LogicalAction::FaderPageDown => {
             let (new_page, display_duration, bank_size) = {
                 let mut m = midi.lock().unwrap();
-                if let crate::controller::LogicalAction::FaderPageDown = mapping.action {
-                    m.fader_page = if m.fader_page >= 99 {
-                        1
-                    } else {
-                        m.fader_page + 1
-                    };
-                } else {
-                    m.fader_page = if m.fader_page <= 1 {
-                        99
-                    } else {
-                        m.fader_page - 1
-                    };
-                }
+                let go_up = matches!(
+                    mapping.action,
+                    crate::controller::LogicalAction::FaderPageUp
+                );
+
+                m.fader_page = crate::calculate_next_page(m.fader_page, go_up);
+
                 m.last_page_change = time::Instant::now();
                 m.show_page_number(m.fader_page);
                 let page = m.fader_page;
@@ -482,7 +490,8 @@ pub async fn execute_mapping(
                 let arg_type = arg_type.clone();
 
                 // For Faders, we need the value
-                let arg = if let crate::controller::LogicalAction::FaderMove { .. } = mapping.action {
+                let arg = if let crate::controller::LogicalAction::FaderMove { .. } = mapping.action
+                {
                     let value = ((d2 as i16) << 7) | (d1 as i16);
                     let f_val = (value as f32) / 16383.0;
                     Some(rosc::OscType::Float(f_val))

@@ -62,8 +62,8 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
                 LogicalAction::Stop => "Action: STOP".to_string(),
                 LogicalAction::Resume => "Action: RESUME".to_string(),
                 LogicalAction::FaderMove { index } => format!("Action: Fader {}", index + 1),
-                LogicalAction::FaderPageUp => "Action: Page DOWN".to_string(),
-                LogicalAction::FaderPageDown => "Action: Page UP".to_string(),
+                LogicalAction::FaderPageUp => "Action: Page UP".to_string(),
+                LogicalAction::FaderPageDown => "Action: Page DOWN".to_string(),
             },
             NodeData::Output(o, _) => match o {
                 Output::Osc { addr, .. } => format!("OSC Out: {}", addr),
