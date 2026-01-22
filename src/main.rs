@@ -42,13 +42,15 @@ fn main() -> anyhow::Result<()> {
         .block_on(OscClient::new(&cfg.eos_ip, cfg.eos_osc_port))
         .context("Failed to create initial OSC client")?;
 
-    let profile = controller::load_profile(&cfg.controller_profile).unwrap_or_else(|e| {
+    let mut profile = controller::load_profile(&cfg.controller_profile).unwrap_or_else(|e| {
         warn!(
             "Failed to load controller profile {}, using default: {}",
             cfg.controller_profile, e
         );
         controller::ControllerProfile::default()
     });
+
+    profile.inject_feedback_mappings();
 
     let midi = Arc::new(Mutex::new(Midi::new(osc_client, profile)));
 
@@ -106,8 +108,9 @@ fn main() -> anyhow::Result<()> {
                 let profile_path = &config.controller_profile;
                 // Reload the profile based on the current config
                 match controller::load_profile(profile_path) {
-                    Ok(p) => {
+                    Ok(mut p) => {
                         info!("Loaded controller profile: {}", p.name);
+                        p.inject_feedback_mappings();
                         m.profile = p;
                     }
                     Err(e) => error!("Failed to reload profile {}: {}", profile_path, e),
@@ -125,6 +128,22 @@ fn main() -> anyhow::Result<()> {
                 let server = OscServer { port: listen_port };
                 if let Err(e) = server.start(server_midi, server_token).await {
                     error!("OSC Server Error: {}", e);
+                }
+            });
+
+            // Visual Effects (Blink) Loop
+            let blink_midi = Arc::clone(&supervision_midi);
+            let blink_token = current_cancel_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(500));
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                             let mut m = blink_midi.lock().unwrap();
+                             m.tick_blink();
+                        }
+                        _ = blink_token.cancelled() => break,
+                    }
                 }
             });
 
@@ -184,6 +203,16 @@ fn main() -> anyhow::Result<()> {
                         _ = interval.tick() => {
                             if let Ok(mut m) = pump_midi.lock() {
                                 while let Some(msg) = m.send_queue.dequeue() {
+                                    // VISUAL FEEDBACK: Check if this message corresponds to a mapping output
+                                    let matches = m.find_mappings_for_midi_message(&msg);
+                                    for (idx, part) in matches {
+                                        m.activity_log.push(eos_midi_bridge::ActivityEvent {
+                                            mapping_idx: idx,
+                                            part,
+                                            value: "Output".to_string(),
+                                        });
+                                    }
+
                                     for conn in &mut m.connections {
                                         let _ = conn.send(&msg);
                                     }

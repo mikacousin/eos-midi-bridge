@@ -39,7 +39,7 @@ pub enum Trigger {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Output {
     Osc {
@@ -65,7 +65,7 @@ pub enum Output {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LogicalAction {
     Go,
@@ -168,6 +168,50 @@ impl ControllerProfile {
             }
         }
         None
+    }
+
+    pub fn inject_feedback_mappings(&mut self) {
+        let mut new_mappings = Vec::new();
+
+        for mapping in &self.mappings {
+            match mapping.action {
+                LogicalAction::FaderMove { index } => {
+                     // Determine the feedback OSC address (1-indexed based on index)
+                    let feedback_addr = format!("/eos/fader/1/{}", index + 1);
+
+                    // Synthesize MIDI Pitchwheel output for motor feedback
+                    let feedback_outputs = vec![Output::MidiPitchwheel {
+                        channel: index as u8,
+                    }];
+
+                    new_mappings.push(Mapping {
+                        trigger: Trigger::Osc {
+                            addr: feedback_addr,
+                        },
+                        action: mapping.action.clone(), 
+                        outputs: feedback_outputs,
+                    });
+                }
+                LogicalAction::Go => {
+                     new_mappings.push(Mapping {
+                        trigger: Trigger::Osc { addr: "/eos/out/event/cue/1/0/resume".to_string() },
+                        action: mapping.action.clone(),
+                        outputs: mapping.outputs.iter().filter(|o| matches!(o, Output::MidiNote { .. })).cloned().collect(),
+                    });
+                }
+                LogicalAction::Stop => {
+                     new_mappings.push(Mapping {
+                        trigger: Trigger::Osc { addr: "/eos/out/event/cue/1/0/stop".to_string() },
+                        action: mapping.action.clone(),
+                        outputs: mapping.outputs.iter().filter(|o| matches!(o, Output::MidiNote { .. })).cloned().collect(),
+                    });
+                }
+
+                _ => {}
+            }
+        }
+
+        self.mappings.extend(new_mappings);
     }
 }
 

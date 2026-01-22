@@ -21,7 +21,10 @@ pub struct Midi {
     pub available_out_ports: Vec<String>,
     pub last_osc_heartbeat: Option<std::time::Instant>,
     pub needs_sync: bool,
+    pub blink_state: bool,
     pub activity_log: Vec<crate::ActivityEvent>,
+    pub intended_dir: CrossfadeState,
+    pub last_applied_dir: CrossfadeState,
 }
 
 impl Midi {
@@ -45,6 +48,9 @@ impl Midi {
             last_osc_heartbeat: None,
             needs_sync: true,
             activity_log: Vec::new(),
+            blink_state: false,
+            intended_dir: CrossfadeState::Inactive,
+            last_applied_dir: CrossfadeState::Inactive,
         }
     }
 
@@ -140,6 +146,100 @@ impl Midi {
             self.send_queue.enqueue(vec![0x90, note, 0]);
         }
     }
+    pub fn find_mappings_for_midi_message(&self, msg: &[u8]) -> Vec<(usize, crate::ActivityPart)> {
+        let mut results = Vec::new();
+
+        // Helper to check if a message matches a Note output
+        let matches_note = |msg: &[u8], channel: u8, note: u8| -> bool {
+            if msg.len() < 3 { return false; }
+            let status = msg[0] & 0xF0;
+            let msg_channel = msg[0] & 0x0F;
+            if msg_channel != channel { return false; }
+            if msg[1] != note { return false; }
+            status == 0x90 || status == 0x80 // Note On or Note Off
+        };
+
+        // Helper to check if a message matches a PitchWheel output
+        let matches_pitch = |msg: &[u8], channel: u8| -> bool {
+             if msg.len() < 3 { return false; }
+             let status = msg[0] & 0xF0;
+             let msg_channel = msg[0] & 0x0F;
+             status == 0xE0 && msg_channel == channel
+        };
+
+        for (idx, mapping) in self.profile.mappings.iter().enumerate() {
+            for (out_idx, output) in mapping.outputs.iter().enumerate() {
+                 let matched = match output {
+                     crate::controller::Output::MidiNote { channel, note, .. } => {
+                         matches_note(msg, *channel, *note)
+                     }
+                     crate::controller::Output::MidiPitchwheel { channel } => {
+                         matches_pitch(msg, *channel)
+                     }
+                     _ => false,
+                 };
+
+                 if matched {
+                     results.push((idx, crate::ActivityPart::Output(out_idx)));
+                 }
+            }
+        }
+        results
+    }
+    pub fn set_crossfade_state(&mut self, new_state: crate::CrossfadeState, force: bool) {
+        if !force && self.crossfade_state == new_state {
+            return;
+        }
+        
+        // Reset blink state whenever we switch states to ensure clean slate
+        if new_state != crate::CrossfadeState::Pause {
+            self.blink_state = false;
+        }
+        self.crossfade_state = new_state;
+
+        let go_fb = self.profile.get_midi_output_for_action(crate::controller::LogicalAction::Go);
+        let stop_fb = self.profile.get_midi_output_for_action(crate::controller::LogicalAction::Stop);
+
+        match self.crossfade_state {
+            crate::CrossfadeState::Go => {
+                if let Some((n, c, v)) = go_fb {
+                    self.send_queue.enqueue(vec![0x90 | c, n, v]);
+                }
+                if let Some((n, c, _)) = stop_fb {
+                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                }
+            }
+            crate::CrossfadeState::GoBack | crate::CrossfadeState::Pause => {
+                if let Some((n, c, v)) = stop_fb {
+                    self.send_queue.enqueue(vec![0x90 | c, n, v]);
+                }
+                if let Some((n, c, _)) = go_fb {
+                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                }
+            }
+            crate::CrossfadeState::Inactive => {
+                if let Some((n, c, _)) = go_fb {
+                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                }
+                if let Some((n, c, _)) = stop_fb {
+                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                }
+            }
+        }
+    }
+
+    pub fn tick_blink(&mut self) {
+        if self.crossfade_state == crate::CrossfadeState::Pause {
+            self.blink_state = !self.blink_state;
+            
+            let go_fb = self.profile.get_midi_output_for_action(crate::controller::LogicalAction::Go);
+            
+            if let Some((n, c, _)) = go_fb {
+                let v = if self.blink_state { 127 } else { 0 };
+                self.send_queue.enqueue(vec![0x90 | c, n, v]);
+            }
+        }
+    }
 }
 
 pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
@@ -152,7 +252,7 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
             let (msg_type, chan) = (status & 0xF0, status & 0x0F);
 
             // Get the client and profile without holding a lock on the whole struct
-            let (client, profile) = {
+            let (_client, profile) = {
                 let m = midi.lock().unwrap();
                 (m.osc_client.clone(), m.profile.clone())
             };
@@ -243,210 +343,212 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                         });
                     }
 
-                    // Logic Action Processing
-                    match &mapping.action {
-                        crate::controller::LogicalAction::Go => {
-                            let mut m = midi.lock().unwrap();
-                            m.crossfade_state = CrossfadeState::Go;
-                            m.activity_log.push(crate::ActivityEvent {
-                                mapping_idx,
-                                part: crate::ActivityPart::Action,
-                                value: "GO".to_string(),
-                            });
-                        }
-                        crate::controller::LogicalAction::Stop => {
-                            let mut m = midi.lock().unwrap();
-                            let label = if m.crossfade_state == CrossfadeState::Go {
-                                m.crossfade_state = CrossfadeState::Pause;
-                                "PAUSE"
-                            } else {
-                                m.crossfade_state = CrossfadeState::GoBack;
-                                "BACK"
-                            };
-                            m.activity_log.push(crate::ActivityEvent {
-                                mapping_idx,
-                                part: crate::ActivityPart::Action,
-                                value: label.to_string(),
-                            });
-                        }
-                        crate::controller::LogicalAction::Resume => {
-                            let mut m = midi.lock().unwrap();
-                            m.crossfade_state = CrossfadeState::Go;
-                            m.activity_log.push(crate::ActivityEvent {
-                                mapping_idx,
-                                part: crate::ActivityPart::Action,
-                                value: "RESUME".to_string(),
-                            });
-                        }
-                        crate::controller::LogicalAction::FaderPageUp
-                        | crate::controller::LogicalAction::FaderPageDown => {
-                            let (new_page, display_duration, bank_size) = {
-                                let mut m = midi.lock().unwrap();
-                                if let crate::controller::LogicalAction::FaderPageDown =
-                                    mapping.action
-                                {
-                                    m.fader_page = if m.fader_page >= 99 {
-                                        1
-                                    } else {
-                                        m.fader_page + 1
-                                    };
-                                } else {
-                                    m.fader_page = if m.fader_page <= 1 {
-                                        99
-                                    } else {
-                                        m.fader_page - 1
-                                    };
-                                }
-                                m.last_page_change = time::Instant::now();
-                                m.show_page_number(m.fader_page);
-                                let page = m.fader_page;
-                                m.activity_log.push(crate::ActivityEvent {
-                                    mapping_idx,
-                                    part: crate::ActivityPart::Action,
-                                    value: format!("PAGE {}", page),
-                                });
-                                (m.fader_page, m.page_display_time, profile.eos_bank_size)
-                            };
-
-                            let client_clone = client.clone();
-                            tokio::spawn(async move {
-                                let _ = client_clone
-                                    .send(
-                                        &format!(
-                                            "/eos/user/1/fader/1/config/{}/{}",
-                                            new_page, bank_size
-                                        ),
-                                        vec![],
-                                    )
-                                    .await;
-                                time::sleep(display_duration).await;
-                                let _ = client_clone
-                                    .send(
-                                        &format!(
-                                            "/eos/user/1/fader/1/config/{}/{}",
-                                            new_page, bank_size
-                                        ),
-                                        vec![],
-                                    )
-                                    .await;
-                            });
-                        }
-                        crate::controller::LogicalAction::FaderMove { index } => {
-                            let value = ((d2 as i16) << 7) | (d1 as i16);
-                            let f_val = (value as f32) / 16383.0;
-                            let mut m = midi.lock().unwrap();
-                            if *index < m.fader_levels.len() {
-                                m.fader_levels[*index] = f_val;
-                                m.activity_log.push(crate::ActivityEvent {
-                                    mapping_idx,
-                                    part: crate::ActivityPart::Action,
-                                    value: format!("{:.0}%", f_val * 100.0),
-                                });
-                            }
-                        }
-                    }
-
-                    // Capture dynamic values for OSC replacement
-                    let (current_page, bank_size) = {
-                        let m = midi.lock().unwrap();
-                        (m.fader_page, m.profile.eos_bank_size)
-                    };
-
-                    // Output Processing
-                    for (out_idx, output) in mapping.outputs.iter().enumerate() {
-                        match output {
-                            crate::controller::Output::Osc { addr, arg_type } => {
-                                let client_clone = client.clone();
-                                let mut final_addr = addr.clone();
-
-                                // Perform dynamic replacement
-                                if final_addr.contains("{page}") {
-                                    final_addr =
-                                        final_addr.replace("{page}", &current_page.to_string());
-                                }
-                                if final_addr.contains("{bank_size}") {
-                                    final_addr =
-                                        final_addr.replace("{bank_size}", &bank_size.to_string());
-                                }
-
-                                let arg_type = arg_type.clone();
-
-                                // For Faders, we need the value
-                                let arg =
-                                    if let crate::controller::LogicalAction::FaderMove { .. } =
-                                        mapping.action
-                                    {
-                                        let value = ((d2 as i16) << 7) | (d1 as i16);
-                                        let f_val = (value as f32) / 16383.0;
-                                        Some(rosc::OscType::Float(f_val))
-                                    } else {
-                                        None
-                                    };
-
-                                let val_suffix = if let Some(rosc::OscType::Float(f)) = &arg {
-                                    format!(" {:.2}", f)
-                                } else {
-                                    String::new()
-                                };
-
-                                let midi_for_log = Arc::clone(&midi);
-                                let addr_for_log = final_addr.clone();
-                                tokio::spawn(async move {
-                                    let mut success = false;
-                                    if arg_type == "float" {
-                                        if let Some(a) = arg {
-                                            if client_clone.send(&final_addr, vec![a]).await.is_ok()
-                                            {
-                                                success = true;
-                                            }
-                                        }
-                                    } else {
-                                        if client_clone.send(&final_addr, vec![]).await.is_ok() {
-                                            success = true;
-                                        }
-                                    }
-
-                                    if success {
-                                        let mut m = midi_for_log.lock().unwrap();
-                                        m.activity_log.push(crate::ActivityEvent {
-                                            mapping_idx,
-                                            part: crate::ActivityPart::Output(out_idx),
-                                            value: format!("{}{}", addr_for_log, val_suffix),
-                                        });
-                                    }
-                                });
-                            }
-                            crate::controller::Output::MidiNote {
-                                note,
-                                channel,
-                                velocity,
-                            } => {
-                                let mut m = midi.lock().unwrap();
-                                m.send_queue.enqueue(vec![0x90 | channel, *note, *velocity]);
-                                m.activity_log.push(crate::ActivityEvent {
-                                    mapping_idx,
-                                    part: crate::ActivityPart::Output(out_idx),
-                                    value: format!("Note {} (V:{})", note, velocity),
-                                });
-                            }
-                            crate::controller::Output::MidiPitchwheel { channel } => {
-                                let value = ((d2 as i16) << 7) | (d1 as i16);
-                                let mut m = midi.lock().unwrap();
-                                let mut data = vec![0xE0 | channel];
-                                data.push((value & 0x7F) as u8);
-                                data.push(((value >> 7) & 0x7F) as u8);
-                                m.send_queue.enqueue(data);
-                                m.activity_log.push(crate::ActivityEvent {
-                                    mapping_idx,
-                                    part: crate::ActivityPart::Output(out_idx),
-                                    value: format!("Pitch {}", value - 8192),
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
+                    // Logic Action Processing via Helper
+                    execute_mapping(Arc::clone(&midi), mapping, mapping_idx, d1, d2).await;
                 }
             }
+        }
+    }
+}
+
+pub async fn execute_mapping(
+    midi: Arc<Mutex<Midi>>,
+    mapping: &crate::controller::Mapping,
+    mapping_idx: usize,
+    d1: u8,
+    d2: u8,
+) {
+    let (client, profile) = {
+        let m = midi.lock().unwrap();
+        (m.osc_client.clone(), m.profile.clone())
+    };
+
+    // Logic Action Processing
+    match &mapping.action {
+        crate::controller::LogicalAction::Go => {
+            let mut m = midi.lock().unwrap();
+            m.crossfade_state = CrossfadeState::Go;
+            m.activity_log.push(crate::ActivityEvent {
+                mapping_idx,
+                part: crate::ActivityPart::Action,
+                value: "GO".to_string(),
+            });
+        }
+        crate::controller::LogicalAction::Stop => {
+            let mut m = midi.lock().unwrap();
+            let label = if m.crossfade_state == CrossfadeState::Go {
+                m.crossfade_state = CrossfadeState::Pause;
+                "PAUSE"
+            } else {
+                m.crossfade_state = CrossfadeState::GoBack;
+                "BACK"
+            };
+            m.activity_log.push(crate::ActivityEvent {
+                mapping_idx,
+                part: crate::ActivityPart::Action,
+                value: label.to_string(),
+            });
+        }
+        crate::controller::LogicalAction::Resume => {
+            let mut m = midi.lock().unwrap();
+            m.crossfade_state = CrossfadeState::Go;
+            m.activity_log.push(crate::ActivityEvent {
+                mapping_idx,
+                part: crate::ActivityPart::Action,
+                value: "RESUME".to_string(),
+            });
+        }
+        crate::controller::LogicalAction::FaderPageUp
+        | crate::controller::LogicalAction::FaderPageDown => {
+            let (new_page, display_duration, bank_size) = {
+                let mut m = midi.lock().unwrap();
+                if let crate::controller::LogicalAction::FaderPageDown = mapping.action {
+                    m.fader_page = if m.fader_page >= 99 {
+                        1
+                    } else {
+                        m.fader_page + 1
+                    };
+                } else {
+                    m.fader_page = if m.fader_page <= 1 {
+                        99
+                    } else {
+                        m.fader_page - 1
+                    };
+                }
+                m.last_page_change = time::Instant::now();
+                m.show_page_number(m.fader_page);
+                let page = m.fader_page;
+                m.activity_log.push(crate::ActivityEvent {
+                    mapping_idx,
+                    part: crate::ActivityPart::Action,
+                    value: format!("PAGE {}", page),
+                });
+                (m.fader_page, m.page_display_time, profile.eos_bank_size)
+            };
+
+            let client_clone = client.clone();
+            tokio::spawn(async move {
+                let _ = client_clone
+                    .send(
+                        &format!("/eos/user/1/fader/1/config/{}/{}", new_page, bank_size),
+                        vec![],
+                    )
+                    .await;
+                time::sleep(display_duration).await;
+                let _ = client_clone
+                    .send(
+                        &format!("/eos/user/1/fader/1/config/{}/{}", new_page, bank_size),
+                        vec![],
+                    )
+                    .await;
+            });
+        }
+        crate::controller::LogicalAction::FaderMove { index } => {
+            let value = ((d2 as i16) << 7) | (d1 as i16);
+            let f_val = (value as f32) / 16383.0;
+            let mut m = midi.lock().unwrap();
+            if *index < m.fader_levels.len() {
+                m.fader_levels[*index] = f_val;
+                m.activity_log.push(crate::ActivityEvent {
+                    mapping_idx,
+                    part: crate::ActivityPart::Action,
+                    value: format!("{:.0}%", f_val * 100.0),
+                });
+            }
+        }
+    }
+
+    // Capture dynamic values for OSC replacement
+    let (current_page, bank_size) = {
+        let m = midi.lock().unwrap();
+        (m.fader_page, m.profile.eos_bank_size)
+    };
+
+    // Output Processing
+    for (out_idx, output) in mapping.outputs.iter().enumerate() {
+        match output {
+            crate::controller::Output::Osc { addr, arg_type } => {
+                let client_clone = client.clone();
+                let mut final_addr = addr.clone();
+
+                // Perform dynamic replacement
+                if final_addr.contains("{page}") {
+                    final_addr = final_addr.replace("{page}", &current_page.to_string());
+                }
+                if final_addr.contains("{bank_size}") {
+                    final_addr = final_addr.replace("{bank_size}", &bank_size.to_string());
+                }
+
+                let arg_type = arg_type.clone();
+
+                // For Faders, we need the value
+                let arg = if let crate::controller::LogicalAction::FaderMove { .. } = mapping.action {
+                    let value = ((d2 as i16) << 7) | (d1 as i16);
+                    let f_val = (value as f32) / 16383.0;
+                    Some(rosc::OscType::Float(f_val))
+                } else {
+                    None
+                };
+
+                let val_suffix = if let Some(rosc::OscType::Float(f)) = &arg {
+                    format!(" {:.2}", f)
+                } else {
+                    String::new()
+                };
+
+                let midi_for_log = Arc::clone(&midi);
+                let addr_for_log = final_addr.clone();
+                tokio::spawn(async move {
+                    let mut success = false;
+                    if arg_type == "float" {
+                        if let Some(a) = arg {
+                            if client_clone.send(&final_addr, vec![a]).await.is_ok() {
+                                success = true;
+                            }
+                        }
+                    } else {
+                        if client_clone.send(&final_addr, vec![]).await.is_ok() {
+                            success = true;
+                        }
+                    }
+
+                    if success {
+                        let mut m = midi_for_log.lock().unwrap();
+                        m.activity_log.push(crate::ActivityEvent {
+                            mapping_idx,
+                            part: crate::ActivityPart::Output(out_idx),
+                            value: format!("{}{}", addr_for_log, val_suffix),
+                        });
+                    }
+                });
+            }
+            crate::controller::Output::MidiNote {
+                note,
+                channel,
+                velocity,
+            } => {
+                let mut m = midi.lock().unwrap();
+                m.send_queue.enqueue(vec![0x90 | channel, *note, *velocity]);
+                m.activity_log.push(crate::ActivityEvent {
+                    mapping_idx,
+                    part: crate::ActivityPart::Output(out_idx),
+                    value: format!("Note {} (V:{})", note, velocity),
+                });
+            }
+            crate::controller::Output::MidiPitchwheel { channel } => {
+                let value = ((d2 as i16) << 7) | (d1 as i16);
+                let mut m = midi.lock().unwrap();
+                let mut data = vec![0xE0 | channel];
+                data.push((value & 0x7F) as u8);
+                data.push(((value >> 7) & 0x7F) as u8);
+                m.send_queue.enqueue(data);
+                m.activity_log.push(crate::ActivityEvent {
+                    mapping_idx,
+                    part: crate::ActivityPart::Output(out_idx),
+                    value: format!("Pitch {}", value - 8192),
+                });
+            }
+            _ => {}
         }
     }
 }

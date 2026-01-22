@@ -132,7 +132,9 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
                     Trigger::MidiPitchwheel { channel } => {
                         ui.label(format!("Ch: {}", *channel + 1));
                     }
-                    Trigger::Osc { .. } => {}
+                    Trigger::Osc { addr } => {
+                        ui.label(format!("Address: {}", addr));
+                    }
                 },
                 NodeData::Action(_, _) => {}
                 NodeData::Output(o, _) => match o {

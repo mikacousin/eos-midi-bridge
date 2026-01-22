@@ -69,11 +69,73 @@ impl OscServer {
     pub async fn handle_packet(&self, packet: OscPacket, midi: &Arc<Mutex<Midi>>) {
         if let OscPacket::Message(msg) = packet {
             debug!(
-                "DEBUG: Received OSC from Eos: {} args: {:?}",
+                "Received OSC from Eos: {} args: {:?}",
                 msg.addr, msg.args
             );
 
             let parts: Vec<&str> = msg.addr.split('/').collect();
+
+            // Handle Generic OSC Triggers from Profile
+            let mut handled = false;
+            // Only check for generic triggers if it looks like a fader command to avoid overhead
+            if msg.addr.starts_with("/eos/fader/1/") || msg.addr.starts_with("/eos/out/event/cue/") {
+                 let mappings: Vec<(usize, crate::controller::Mapping)> = {
+                    let m = midi.lock().unwrap();
+                    m.profile.mappings.iter().enumerate()
+                        .filter(|(_, map)| matches!(&map.trigger, crate::controller::Trigger::Osc { addr } if addr == &msg.addr))
+                        .map(|(i, map)| (i, map.clone()))
+                        .collect()
+                };
+
+                for (idx, mapping) in mappings {
+                    if let Some(OscType::Float(val)) = msg.args.first() {
+                        let midi_val = (val * 16383.0).round() as u16;
+                        let d1 = (midi_val & 0x7F) as u8;
+                        let d2 = ((midi_val >> 7) & 0x7F) as u8;
+                        
+                        // Log Trigger Activity
+                        {
+                            let mut m = midi.lock().unwrap();
+                            m.activity_log.push(crate::ActivityEvent {
+                                mapping_idx: idx,
+                                part: crate::ActivityPart::Trigger,
+                                value: format!("OSC {:.2}", val),
+                            });
+                        }
+
+                        crate::midi::execute_mapping(midi.clone(), &mapping, idx, d1, d2).await;
+                        handled = true;
+                        
+                        // Update state if we triggered a Stop or Go action
+                        match mapping.action {
+                            crate::controller::LogicalAction::Stop => {
+                                let mut m = midi.lock().unwrap();
+                                m.set_crossfade_state(crate::CrossfadeState::Pause, false);
+                            },
+                             crate::controller::LogicalAction::Go => {
+                                let mut m = midi.lock().unwrap();
+                                m.set_crossfade_state(crate::CrossfadeState::Go, false);
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            // FALLBACK: Dynamic Event Handling (regardless of mapping match)
+            // This is required because EOS events include the specific cue number,
+            // which changes, making static mapping impossible for transport state tracking.
+            if msg.addr.starts_with("/eos/out/event/cue/") {
+                if msg.addr.ends_with("/resume") {
+                    let mut m = midi.lock().unwrap();
+                    // FORCE UPDATE because Resume is definitive
+                    m.set_crossfade_state(crate::CrossfadeState::Go, true);
+                } else if msg.addr.ends_with("/stop") {
+                    let mut m = midi.lock().unwrap();
+                    // FORCE UPDATE because Stop is definitive
+                    m.set_crossfade_state(crate::CrossfadeState::Pause, true);
+                }
+            }
 
             // Handle Fader Labels: /eos/out/fader/1/{index}/name
             if msg.addr.starts_with("/eos/out/fader/1/") && msg.addr.ends_with("/name") {
@@ -137,8 +199,11 @@ impl OscServer {
                     }
                 }
             }
+
             // Move Motorized Faders: /eos/fader/1/{index}
-            else if msg.addr.starts_with("/eos/fader/1/") {
+
+            // Move Motorized Faders: /eos/fader/1/{index}
+            if !handled && msg.addr.starts_with("/eos/fader/1/") {
                 // For "/eos/fader/1/5", parts are ["", "eos", "fader", "1", "5"] -> index 4
                 if let (Some(f_str), Some(OscType::Float(val))) = (parts.get(4), msg.args.first()) {
                     if let Ok(f_num) = f_str.parse::<usize>() {
@@ -152,7 +217,10 @@ impl OscServer {
                         }
                     }
                 }
-            } else if msg.addr == "/eos/out/event/cue/1/0/stop" {
+            }
+            
+            // INDEPENDENT CHECK: Cue Events (Update State even if mapped)
+            if msg.addr == "/eos/out/event/cue/1/0/stop" {
                 let mut m = midi.lock().unwrap();
                 if m.crossfade_state == CrossfadeState::Go
                     || m.crossfade_state == CrossfadeState::GoBack
@@ -195,19 +263,26 @@ impl OscServer {
                         if let Ok(new_cue_num) = simplified_cue.parse::<f32>() {
                             let mut m = midi.lock().unwrap();
 
-                            // Compare to know the direction if we were Inactive
-                            if m.crossfade_state == CrossfadeState::Inactive
-                                || m.crossfade_state == CrossfadeState::Pause
-                            {
-                                if let Some(old_cue) = m.current_cue {
-                                    if new_cue_num > old_cue {
-                                        m.crossfade_state = CrossfadeState::Go;
-                                    } else if new_cue_num < old_cue {
-                                        m.crossfade_state = CrossfadeState::GoBack;
-                                    }
+                            // Calculate intended direction based on cue change
+                            // We do NOT set the crossfade_state here directly to avoid race conditions with "Cut" (time=0) cues.
+                            // The actual state change is gated by the active/cue progress handler.
+                            if let Some(old_cue) = m.current_cue {
+                                if new_cue_num > old_cue {
+                                    m.intended_dir = CrossfadeState::Go;
+                                } else if new_cue_num < old_cue {
+                                    m.intended_dir = CrossfadeState::GoBack;
                                 } else {
-                                    m.crossfade_state = CrossfadeState::Go;
+                                    // Same cue number.
+                                    // If we are currently active (Go or GoBack), we should NOT assume this is a new "Go" event.
+                                    // It could be a redundant update (e.g. 50% mark).
+                                    // Only default to Go if we are Inactive (implying a Re-Go).
+                                    if m.crossfade_state == CrossfadeState::Inactive {
+                                         m.intended_dir = CrossfadeState::Go;
+                                    } else {
+                                    }
                                 }
+                            } else {
+                                m.intended_dir = CrossfadeState::Go;
                             }
 
                             m.current_cue = Some(new_cue_num);
@@ -253,46 +328,25 @@ impl OscServer {
                     let mut m = midi.lock().unwrap();
 
                     if *progress < 1.0 {
-                        let go_fb = m
-                            .profile
-                            .get_midi_output_for_action(crate::controller::LogicalAction::Go);
-                        let stop_fb = m
-                            .profile
-                            .get_midi_output_for_action(crate::controller::LogicalAction::Stop);
+                        // Activate the intended direction if we are not already in it (or if overriding something other than Pause)
+                        let intended = m.intended_dir;
+                        let last = m.last_applied_dir;
+                        let current = m.crossfade_state;
 
-                        match m.crossfade_state {
-                            CrossfadeState::Go => {
-                                if let Some((n, c, v)) = go_fb {
-                                    m.send_queue.enqueue(vec![0x90 | c, n, v]);
-                                }
-                                if let Some((n, c, _)) = stop_fb {
-                                    m.send_queue.enqueue(vec![0x90 | c, n, 0]);
-                                }
-                            }
-                            CrossfadeState::GoBack | CrossfadeState::Pause => {
-                                if let Some((n, c, v)) = stop_fb {
-                                    m.send_queue.enqueue(vec![0x90 | c, n, v]);
-                                }
-                                if let Some((n, c, _)) = go_fb {
-                                    m.send_queue.enqueue(vec![0x90 | c, n, 0]);
-                                }
-                            }
-                            CrossfadeState::Inactive => {}
+                        // Only apply change if direction is new OR if we are Inactive
+                        // Respect Pause: If Paused, do not switch unless the intended direction actually changed (e.g. Go -> Back)
+                        if intended != last {
+                             m.set_crossfade_state(intended, false);
+                             m.last_applied_dir = intended;
+                        } else if current == CrossfadeState::Inactive {
+                             // Starting a fade from Inactive
+                             m.set_crossfade_state(intended, false);
+                             m.last_applied_dir = intended;
                         }
                     } else {
-                        let go_fb = m
-                            .profile
-                            .get_midi_output_for_action(crate::controller::LogicalAction::Go);
-                        let stop_fb = m
-                            .profile
-                            .get_midi_output_for_action(crate::controller::LogicalAction::Stop);
-                        m.crossfade_state = CrossfadeState::Inactive;
-                        if let Some((n, c, _)) = go_fb {
-                            m.send_queue.enqueue(vec![0x90 | c, n, 0]);
-                        }
-                        if let Some((n, c, _)) = stop_fb {
-                            m.send_queue.enqueue(vec![0x90 | c, n, 0]);
-                        }
+                         if m.crossfade_state != CrossfadeState::Inactive {
+                         }
+                        m.set_crossfade_state(CrossfadeState::Inactive, false);
                     }
                 }
             }
