@@ -410,6 +410,11 @@ impl eframe::App for BridgeApp {
                     }
                 }
                 Tab::NodeGraph => {
+                    // Capture input zoom (scroll/pinch) from egui's standard helper
+                    // This handles Ctrl + Scroll and Pinch gestures automatically
+                    let input_zoom = ui.input(|i| i.zoom_delta());
+                    self.snarl_zoom_pending *= input_zoom;
+
                     ui.horizontal(|ui| {
                         if ui.button("➕").on_hover_text("Zoom In").clicked() {
                             self.snarl_zoom_pending *= 1.25;
@@ -424,7 +429,7 @@ impl eframe::App for BridgeApp {
                             }
                         }
                         ui.separator();
-                        ui.label("Pinch/Scroll to zoom, Drag to pan");
+                        ui.label("Ctrl + Scroll to zoom, Drag to pan");
                     });
 
                     ui.separator();
@@ -437,9 +442,16 @@ impl eframe::App for BridgeApp {
                     }
 
                     let snarl_rect = ui.available_rect_before_wrap();
+
+                    // Determine zoom center: prefer mouse pointer if hovering the graph, otherwise center of view
+                    let zoom_center = ui
+                        .input(|i| i.pointer.hover_pos())
+                        .filter(|pos| snarl_rect.contains(*pos))
+                        .unwrap_or(snarl_rect.center());
+
                     let mut viewer = eos_midi_bridge::nodes::NodeGraphViewer {
                         zoom_delta: self.snarl_zoom_pending,
-                        zoom_center: Some(snarl_rect.center()),
+                        zoom_center: Some(zoom_center),
                     };
 
                     self.snarl.show(
@@ -478,57 +490,69 @@ impl eframe::App for BridgeApp {
 
 impl BridgeApp {
     fn populate_snarl(&mut self, profile: &eos_midi_bridge::controller::ControllerProfile) {
-        use eos_midi_bridge::nodes::NodeData;
         use eos_midi_bridge::controller::LogicalAction;
+        use eos_midi_bridge::nodes::NodeData;
 
         self.snarl = egui_snarl::Snarl::new();
         self.mapping_nodes.clear();
 
         // deduplicate actions: Action -> (NodeId, Position)
-        let mut action_node_map: std::collections::HashMap<LogicalAction, (egui_snarl::NodeId, egui::Pos2)> = std::collections::HashMap::new();
-        
+        let mut action_node_map: std::collections::HashMap<
+            LogicalAction,
+            (egui_snarl::NodeId, egui::Pos2),
+        > = std::collections::HashMap::new();
+
         // deduplicate outputs: (Action, Output) -> NodeId
-        let mut action_output_map: std::collections::HashMap<(LogicalAction, eos_midi_bridge::controller::Output), egui_snarl::NodeId> = std::collections::HashMap::new();
+        let mut action_output_map: std::collections::HashMap<
+            (LogicalAction, eos_midi_bridge::controller::Output),
+            egui_snarl::NodeId,
+        > = std::collections::HashMap::new();
 
         // Track visual slots used per action to stack multiple triggers/outputs
-        let mut action_trigger_slots: std::collections::HashMap<LogicalAction, usize> = std::collections::HashMap::new();
-        let mut action_output_slots: std::collections::HashMap<LogicalAction, usize> = std::collections::HashMap::new();
+        let mut action_trigger_slots: std::collections::HashMap<LogicalAction, usize> =
+            std::collections::HashMap::new();
+        let mut action_output_slots: std::collections::HashMap<LogicalAction, usize> =
+            std::collections::HashMap::new();
 
         // Column trackers
         let mut col_rows = [0, 0]; // [Left Col (Buttons), Right Col (Faders)]
 
         for (m_idx, mapping) in profile.mappings.iter().enumerate() {
             // 1. Resolve Action Node
-            let (action_id, action_pos) = *action_node_map.entry(mapping.action.clone()).or_insert_with(|| {
-                 // Determine column based on action type
-                 let col_idx = if let LogicalAction::FaderMove { .. } = mapping.action {
-                     1 // Right Column
-                 } else {
-                     0 // Left Column
-                 };
-                 
-                 let row_idx = col_rows[col_idx];
-                 col_rows[col_idx] += 1;
+            let (action_id, action_pos) = *action_node_map
+                .entry(mapping.action.clone())
+                .or_insert_with(|| {
+                    // Determine column based on action type
+                    let col_idx = if let LogicalAction::FaderMove { .. } = mapping.action {
+                        1 // Right Column
+                    } else {
+                        0 // Left Column
+                    };
 
-                 let default_x = col_idx as f32 * 1200.0;
-                 let default_y = row_idx as f32 * 200.0; 
+                    let row_idx = col_rows[col_idx];
+                    col_rows[col_idx] += 1;
 
-                 let pos = egui::pos2(default_x + 350.0, default_y + 50.0);
-                 let id = self.snarl.insert_node(
-                    pos,
-                    NodeData::Action(mapping.action.clone(), Default::default()),
-                );
-                self.snarl.open_node(id, true);
-                (id, pos)
-            });
+                    let default_x = col_idx as f32 * 1200.0;
+                    let default_y = row_idx as f32 * 200.0;
+
+                    let pos = egui::pos2(default_x + 350.0, default_y + 50.0);
+                    let id = self.snarl.insert_node(
+                        pos,
+                        NodeData::Action(mapping.action.clone(), Default::default()),
+                    );
+                    self.snarl.open_node(id, true);
+                    (id, pos)
+                });
 
             // 2. Place Trigger (Relative to Action)
-            let trigger_slot = *action_trigger_slots.entry(mapping.action.clone()).or_insert(0);
+            let trigger_slot = *action_trigger_slots
+                .entry(mapping.action.clone())
+                .or_insert(0);
             let trigger_y_offset = trigger_slot as f32 * 100.0;
             *action_trigger_slots.get_mut(&mapping.action).unwrap() += 1;
 
             let trigger_pos = egui::pos2(action_pos.x - 300.0, action_pos.y + trigger_y_offset);
-            
+
             let trigger_id = self.snarl.insert_node(
                 trigger_pos,
                 NodeData::Trigger(mapping.trigger.clone(), Default::default()),
@@ -536,40 +560,52 @@ impl BridgeApp {
             self.snarl.open_node(trigger_id, true);
 
             self.snarl.connect(
-                egui_snarl::OutPinId { node: trigger_id, output: 0 },
-                egui_snarl::InPinId { node: action_id, input: 0 },
+                egui_snarl::OutPinId {
+                    node: trigger_id,
+                    output: 0,
+                },
+                egui_snarl::InPinId {
+                    node: action_id,
+                    input: 0,
+                },
             );
 
             // 3. Place Outputs (Relative to Action)
             let mut output_node_ids = Vec::new();
             for output in &mapping.outputs {
                 let output_key = (mapping.action.clone(), output.clone());
-                
+
                 let output_id = if let Some(&id) = action_output_map.get(&output_key) {
                     id
                 } else {
-                    let output_slot = *action_output_slots.entry(mapping.action.clone()).or_insert(0);
+                    let output_slot = *action_output_slots
+                        .entry(mapping.action.clone())
+                        .or_insert(0);
                     let output_y_offset = output_slot as f32 * 80.0;
                     *action_output_slots.get_mut(&mapping.action).unwrap() += 1;
 
-                    let output_pos = egui::pos2(action_pos.x + 300.0, action_pos.y + output_y_offset);
-                    
+                    let output_pos =
+                        egui::pos2(action_pos.x + 300.0, action_pos.y + output_y_offset);
+
                     let id = self.snarl.insert_node(
                         output_pos,
                         NodeData::Output(output.clone(), Default::default()),
                     );
                     self.snarl.open_node(id, true);
                     action_output_map.insert(output_key, id);
-                    
+
                     self.snarl.connect(
-                        egui_snarl::OutPinId { node: action_id, output: 0 },
+                        egui_snarl::OutPinId {
+                            node: action_id,
+                            output: 0,
+                        },
                         egui_snarl::InPinId { node: id, input: 0 },
                     );
                     id
                 };
                 output_node_ids.push(output_id);
             }
-            
+
             self.mapping_nodes.insert(
                 m_idx,
                 MappingNodeIds {
