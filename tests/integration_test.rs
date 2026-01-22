@@ -107,3 +107,71 @@ fn test_lcd_centering() {
     assert!(centered_text.contains("Page 5"));
     assert_eq!(&centered_text[0..1], " "); // Should have padding
 }
+
+#[test]
+fn test_trigger_parsing() {
+    use eos_midi_bridge::controller::{MidiTriggerMode, Trigger};
+
+    // Note On 60 127
+    let msg_on = vec![0x90, 60, 127];
+    let trigger_on = Trigger::from_midi_message(&msg_on).unwrap();
+    if let Trigger::MidiNote { note, mode, .. } = trigger_on {
+        assert_eq!(note, 60);
+        assert_eq!(mode, MidiTriggerMode::Press);
+    } else {
+        panic!("Matched wrong trigger type");
+    }
+
+    // Note Off (via Note On 0)
+    let msg_off = vec![0x90, 60, 0];
+    let trigger_off = Trigger::from_midi_message(&msg_off).unwrap();
+    if let Trigger::MidiNote { note, mode, .. } = trigger_off {
+        assert_eq!(note, 60);
+        assert_eq!(mode, MidiTriggerMode::Release);
+    } else {
+        panic!("Matched wrong trigger type");
+    }
+
+    // CC 7 127
+    let msg_cc = vec![0xB0, 7, 127];
+    let trigger_cc = Trigger::from_midi_message(&msg_cc).unwrap();
+    if let Trigger::MidiCc { cc, .. } = trigger_cc {
+        assert_eq!(cc, 7);
+    } else {
+        panic!("Matched wrong trigger type");
+    }
+}
+
+#[test]
+fn test_output_matching() {
+    use eos_midi_bridge::controller::{ControllerProfile, LogicalAction};
+
+    // Setup a simple profile
+    let profile = ControllerProfile::default();
+
+    // Default profile has a Go button on Note 94.
+    // It outputs a Note 94 (LED).
+    // Let's verify that a message [0x90, 94, 127] is matched as that output.
+
+    let msg = vec![0x90, 94, 127];
+    let matches = profile.match_output_message(&msg);
+
+    assert!(
+        !matches.is_empty(),
+        "Should have matched the output mapping"
+    );
+    // Verify it points to the correct mapping (Go)
+    // We assume the default profile's first mapping is Go (index 0 or so)
+    // Actually, let's find the Go mapping first
+
+    // We can rely on match_output_message returning indices.
+    // If we iterate mappings, we find the one that has Output::MidiNote with note 94
+    let (match_idx, _) = matches[0];
+    let mapping = &profile.mappings[match_idx];
+
+    // Verify it is indeed the Go action
+    match mapping.action {
+        LogicalAction::Go => {}
+        _ => panic!("Expected Go action mapping"),
+    }
+}

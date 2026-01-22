@@ -147,53 +147,9 @@ impl Midi {
         }
     }
     pub fn find_mappings_for_midi_message(&self, msg: &[u8]) -> Vec<(usize, crate::ActivityPart)> {
-        let mut results = Vec::new();
-
-        // Helper to check if a message matches a Note output
-        let matches_note = |msg: &[u8], channel: u8, note: u8| -> bool {
-            if msg.len() < 3 {
-                return false;
-            }
-            let status = msg[0] & 0xF0;
-            let msg_channel = msg[0] & 0x0F;
-            if msg_channel != channel {
-                return false;
-            }
-            if msg[1] != note {
-                return false;
-            }
-            status == 0x90 || status == 0x80 // Note On or Note Off
-        };
-
-        // Helper to check if a message matches a PitchWheel output
-        let matches_pitch = |msg: &[u8], channel: u8| -> bool {
-            if msg.len() < 3 {
-                return false;
-            }
-            let status = msg[0] & 0xF0;
-            let msg_channel = msg[0] & 0x0F;
-            status == 0xE0 && msg_channel == channel
-        };
-
-        for (idx, mapping) in self.profile.mappings.iter().enumerate() {
-            for (out_idx, output) in mapping.outputs.iter().enumerate() {
-                let matched = match output {
-                    crate::controller::Output::MidiNote { channel, note, .. } => {
-                        matches_note(msg, *channel, *note)
-                    }
-                    crate::controller::Output::MidiPitchwheel { channel } => {
-                        matches_pitch(msg, *channel)
-                    }
-                    _ => false,
-                };
-
-                if matched {
-                    results.push((idx, crate::ActivityPart::Output(out_idx)));
-                }
-            }
-        }
-        results
+        self.profile.match_output_message(msg)
     }
+
     pub fn set_crossfade_state(&mut self, new_state: crate::CrossfadeState, force: bool) {
         if !force && self.crossfade_state == new_state {
             return;
@@ -262,8 +218,8 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
             if msg.len() < 3 {
                 return;
             }
-            let (status, d1, d2) = (msg[0], msg[1], msg[2]);
-            let (msg_type, chan) = (status & 0xF0, status & 0x0F);
+            let (status, _d1, _d2) = (msg[0], msg[1], msg[2]);
+            let (_msg_type, _chan) = (status & 0xF0, status & 0x0F);
 
             // Get the client and profile without holding a lock on the whole struct
             let (_client, profile) = {
@@ -272,35 +228,15 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
             };
 
             // Identify the trigger
-            let trigger = match msg_type {
-                0x90 => {
-                    let mode = if d2 == 127 {
-                        crate::controller::MidiTriggerMode::Press
-                    } else {
-                        crate::controller::MidiTriggerMode::Release
-                    };
-                    Some(crate::controller::Trigger::MidiNote {
-                        note: d1,
-                        channel: chan,
-                        mode,
-                    })
-                }
-                0xB0 => Some(crate::controller::Trigger::MidiCc {
-                    cc: d1,
-                    channel: chan,
-                }),
-                0xE0 => Some(crate::controller::Trigger::MidiPitchwheel { channel: chan }),
-                _ => None,
-            };
-
-            let trigger = match trigger {
+            let trigger = match crate::controller::Trigger::from_midi_message(&msg) {
                 Some(t) => t,
                 None => return,
             };
 
             // Find matching mappings
             for (mapping_idx, mapping) in profile.mappings.iter().enumerate() {
-                let matches = match (&mapping.trigger, &trigger) {
+                // Check if trigger matches mapping
+                let is_match = match (&mapping.trigger, &trigger) {
                     (
                         crate::controller::Trigger::MidiNote {
                             note: n1,
@@ -334,7 +270,8 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                     _ => false,
                 };
 
-                if matches {
+                if is_match {
+                    let (d1, d2) = (msg[1], msg[2]);
                     // Log trigger activity
                     {
                         let mut m = midi.lock().unwrap();

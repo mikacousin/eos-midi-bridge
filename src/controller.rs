@@ -39,6 +39,37 @@ pub enum Trigger {
     },
 }
 
+impl Trigger {
+    pub fn from_midi_message(msg: &[u8]) -> Option<Self> {
+        if msg.len() < 3 {
+            return None;
+        }
+        let (status, d1, d2) = (msg[0], msg[1], msg[2]);
+        let (msg_type, chan) = (status & 0xF0, status & 0x0F);
+
+        match msg_type {
+            0x90 => {
+                let mode = if d2 == 127 {
+                    MidiTriggerMode::Press
+                } else {
+                    MidiTriggerMode::Release
+                };
+                Some(Trigger::MidiNote {
+                    note: d1,
+                    channel: chan,
+                    mode,
+                })
+            }
+            0xB0 => Some(Trigger::MidiCc {
+                cc: d1,
+                channel: chan,
+            }),
+            0xE0 => Some(Trigger::MidiPitchwheel { channel: chan }),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Output {
@@ -176,7 +207,7 @@ impl ControllerProfile {
         for mapping in &self.mappings {
             match mapping.action {
                 LogicalAction::FaderMove { index } => {
-                     // Determine the feedback OSC address (1-indexed based on index)
+                    // Determine the feedback OSC address (1-indexed based on index)
                     let feedback_addr = format!("/eos/fader/1/{}", index + 1);
 
                     // Synthesize MIDI Pitchwheel output for motor feedback
@@ -188,22 +219,36 @@ impl ControllerProfile {
                         trigger: Trigger::Osc {
                             addr: feedback_addr,
                         },
-                        action: mapping.action.clone(), 
+                        action: mapping.action.clone(),
                         outputs: feedback_outputs,
                     });
                 }
                 LogicalAction::Go => {
-                     new_mappings.push(Mapping {
-                        trigger: Trigger::Osc { addr: "/eos/out/event/cue/1/0/resume".to_string() },
+                    new_mappings.push(Mapping {
+                        trigger: Trigger::Osc {
+                            addr: "/eos/out/event/cue/1/0/resume".to_string(),
+                        },
                         action: mapping.action.clone(),
-                        outputs: mapping.outputs.iter().filter(|o| matches!(o, Output::MidiNote { .. })).cloned().collect(),
+                        outputs: mapping
+                            .outputs
+                            .iter()
+                            .filter(|o| matches!(o, Output::MidiNote { .. }))
+                            .cloned()
+                            .collect(),
                     });
                 }
                 LogicalAction::Stop => {
-                     new_mappings.push(Mapping {
-                        trigger: Trigger::Osc { addr: "/eos/out/event/cue/1/0/stop".to_string() },
+                    new_mappings.push(Mapping {
+                        trigger: Trigger::Osc {
+                            addr: "/eos/out/event/cue/1/0/stop".to_string(),
+                        },
                         action: mapping.action.clone(),
-                        outputs: mapping.outputs.iter().filter(|o| matches!(o, Output::MidiNote { .. })).cloned().collect(),
+                        outputs: mapping
+                            .outputs
+                            .iter()
+                            .filter(|o| matches!(o, Output::MidiNote { .. }))
+                            .cloned()
+                            .collect(),
                     });
                 }
 
@@ -212,6 +257,51 @@ impl ControllerProfile {
         }
 
         self.mappings.extend(new_mappings);
+    }
+
+    pub fn match_output_message(&self, msg: &[u8]) -> Vec<(usize, crate::ActivityPart)> {
+        let mut results = Vec::new();
+
+        // Helper to check if a message matches a Note output
+        let matches_note = |msg: &[u8], channel: u8, note: u8| -> bool {
+            if msg.len() < 3 {
+                return false;
+            }
+            let status = msg[0] & 0xF0;
+            let msg_channel = msg[0] & 0x0F;
+            if msg_channel != channel {
+                return false;
+            }
+            if msg[1] != note {
+                return false;
+            }
+            status == 0x90 || status == 0x80 // Note On or Note Off
+        };
+
+        // Helper to check if a message matches a PitchWheel output
+        let matches_pitch = |msg: &[u8], channel: u8| -> bool {
+            if msg.len() < 3 {
+                return false;
+            }
+            let status = msg[0] & 0xF0;
+            let msg_channel = msg[0] & 0x0F;
+            status == 0xE0 && msg_channel == channel
+        };
+
+        for (idx, mapping) in self.mappings.iter().enumerate() {
+            for (out_idx, output) in mapping.outputs.iter().enumerate() {
+                let matched = match output {
+                    Output::MidiNote { channel, note, .. } => matches_note(msg, *channel, *note),
+                    Output::MidiPitchwheel { channel } => matches_pitch(msg, *channel),
+                    _ => false,
+                };
+
+                if matched {
+                    results.push((idx, crate::ActivityPart::Output(out_idx)));
+                }
+            }
+        }
+        results
     }
 }
 
