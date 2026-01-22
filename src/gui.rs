@@ -48,7 +48,7 @@ impl BridgeApp {
             status_message: "Ready".to_string(),
             tx_system,
             file_dialog: egui_file_dialog::FileDialog::new(),
-            active_tab: Tab::NodeGraph,
+            active_tab: Tab::Console,
             snarl: egui_snarl::Snarl::new(),
             snarl_zoom_pending: 1.0,
             mapping_nodes: std::collections::HashMap::new(),
@@ -155,8 +155,8 @@ impl eframe::App for BridgeApp {
 
             // Tab Navigation
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.active_tab, Tab::NodeGraph, "🕸 Node Graph");
-                ui.selectable_value(&mut self.active_tab, Tab::Console, "🎛 Console");
+                ui.selectable_value(&mut self.active_tab, Tab::Console, "🎛 Simple View");
+                ui.selectable_value(&mut self.active_tab, Tab::NodeGraph, "🕸 Advanced View");
                 ui.selectable_value(&mut self.active_tab, Tab::Settings, "⚙ Settings");
             });
 

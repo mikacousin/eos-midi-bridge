@@ -143,7 +143,7 @@ impl OscServer {
                         {
                             let mut m = midi.lock().unwrap();
                             let eos_bank_size = m.profile.eos_bank_size;
-                            if f_num <= eos_bank_size {
+                            if f_num > 0 && f_num <= eos_bank_size {
                                 let mut text = text.clone();
                                 if text.starts_with("S") {
                                     let split: Vec<&str> = text.split_whitespace().collect();
@@ -207,7 +207,7 @@ impl OscServer {
                     if let Ok(f_num) = f_str.parse::<usize>() {
                         let mut m = midi.lock().unwrap();
                         let eos_bank_size = m.profile.eos_bank_size;
-                        if f_num <= eos_bank_size {
+                        if f_num > 0 && f_num <= eos_bank_size {
                             let pitch = (val * 16383.0).round() as i16 - 8192;
                             // Update physical pitchwheel if a mapping exists for this fader index
                             m.enqueue_pitchwheel((f_num - 1) as u8, pitch);
