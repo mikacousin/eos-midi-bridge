@@ -1,5 +1,8 @@
 # Eos MIDI-OSC Bridge (iCon Platform M+)
 
+> [!NOTE]
+> This project is in its early stages and was created with Google Antigravity.
+
 A high-performance, asynchronous bridge connecting the **iCon Platform M+** (with D2 Display) to **ETC Eos Family** lighting consoles. Built in Rust for ultra-low latency and reliability.
 
 ## ✨ Key Features
