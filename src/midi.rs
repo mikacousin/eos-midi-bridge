@@ -61,17 +61,17 @@ impl Midi {
     pub fn enqueue_pitchwheel(&self, fader_index: u8, value: i16) {
         // Find a mapping for FaderMove { index: fader_index } that has a MidiPitchwheel output
         for mapping in &self.profile.mappings {
-            if let crate::controller::LogicalAction::FaderMove { index } = mapping.action {
-                if index == fader_index as usize {
-                    for output in &mapping.outputs {
-                        if let crate::controller::Output::MidiPitchwheel { channel } = output {
-                            let val = (value + 8192) as u16; // Convert pitch (-8192 to 8191) to 0-16383 range
-                            let mut data = vec![0xE0 | channel];
-                            data.push((val & 0x7F) as u8); // LSB
-                            data.push(((val >> 7) & 0x7F) as u8); // MSB
-                            self.send_queue.enqueue(data);
-                            return;
-                        }
+            if let crate::controller::LogicalAction::FaderMove { index } = mapping.action
+                && index == fader_index as usize
+            {
+                for output in &mapping.outputs {
+                    if let crate::controller::Output::MidiPitchwheel { channel } = output {
+                        let val = (value + 8192) as u16; // Convert pitch (-8192 to 8191) to 0-16383 range
+                        let mut data = vec![0xE0 | channel];
+                        data.push((val & 0x7F) as u8); // LSB
+                        data.push(((val >> 7) & 0x7F) as u8); // MSB
+                        self.send_queue.enqueue(data);
+                        return;
                     }
                 }
             }
@@ -447,15 +447,13 @@ pub async fn execute_mapping(
                 tokio::spawn(async move {
                     let mut success = false;
                     if arg_type == "float" {
-                        if let Some(a) = arg {
-                            if client_clone.send(&final_addr, vec![a]).await.is_ok() {
-                                success = true;
-                            }
-                        }
-                    } else {
-                        if client_clone.send(&final_addr, vec![]).await.is_ok() {
+                        if let Some(a) = arg
+                            && client_clone.send(&final_addr, vec![a]).await.is_ok()
+                        {
                             success = true;
                         }
+                    } else if client_clone.send(&final_addr, vec![]).await.is_ok() {
+                        success = true;
                     }
 
                     if success {

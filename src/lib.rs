@@ -47,6 +47,12 @@ pub struct Queue<T> {
     elements: Arc<Mutex<VecDeque<T>>>,
 }
 
+impl<T> Default for Queue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> Queue<T> {
     pub fn new() -> Self {
         Self {
@@ -94,12 +100,10 @@ pub fn resolve_crossfade_direction(
             Some(CrossfadeState::Go)
         } else if new_cue < old_cue {
             Some(CrossfadeState::GoBack)
+        } else if current_state == CrossfadeState::Inactive {
+            Some(CrossfadeState::Go)
         } else {
-            if current_state == CrossfadeState::Inactive {
-                Some(CrossfadeState::Go)
-            } else {
-                None
-            }
+            None
         }
     } else {
         Some(CrossfadeState::Go)
@@ -113,11 +117,9 @@ pub fn calculate_next_page(current_page: u8, go_up: bool) -> u8 {
         } else {
             current_page + 1
         }
+    } else if current_page <= 1 {
+        99
     } else {
-        if current_page <= 1 {
-            99
-        } else {
-            current_page - 1
-        }
+        current_page - 1
     }
 }

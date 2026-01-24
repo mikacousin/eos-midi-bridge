@@ -6,19 +6,10 @@ use egui_snarl::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct NodeLiveState {
     pub last_value: String,
     pub last_activity: Option<std::time::Instant>,
-}
-
-impl Default for NodeLiveState {
-    fn default() -> Self {
-        Self {
-            last_value: String::new(),
-            last_activity: None,
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -50,7 +41,7 @@ pub struct NodeGraphViewer {
 
 impl SnarlViewer<NodeData> for NodeGraphViewer {
     fn title(&mut self, node: &NodeData) -> String {
-        let t = match node {
+        match node {
             NodeData::Trigger(t, _) => match t {
                 Trigger::MidiNote { note, .. } => format!("MIDI Note {}", note),
                 Trigger::MidiCc { cc, .. } => format!("MIDI CC {}", cc),
@@ -72,8 +63,7 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
                 Output::LcdStrip { strip, .. } => format!("LCD Strip {}", strip),
                 Output::LcdText { text, .. } => format!("LCD Text: {}", text),
             },
-        };
-        t
+        }
     }
 
     fn show_body(
@@ -97,7 +87,7 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
                 let elapsed = live_state
                     .last_activity
                     .map(|last| last.elapsed().as_millis());
-                let is_active = elapsed.map_or(false, |e| e < 300);
+                let is_active = elapsed.is_some_and(|e| e < 300);
 
                 if is_active {
                     // Request continuous repaint while flashing

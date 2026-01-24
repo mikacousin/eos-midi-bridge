@@ -70,11 +70,9 @@ impl BridgeApp {
 impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Intercept Close Request (System X button)
-        if ctx.input(|i| i.viewport().close_requested()) {
-            if !self.allowed_to_close {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.show_quit_confirmation = true;
-            }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allowed_to_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.show_quit_confirmation = true;
         }
 
         // Handle Quit Shortcut (Ctrl+Q / Cmd+Q)
@@ -120,55 +118,51 @@ impl eframe::App for BridgeApp {
         let main_enabled = !self.show_quit_confirmation;
 
         // --- Activity Log Consumption ---
-        if let Ok(mut m) = self.midi.lock() {
-            if !m.activity_log.is_empty() {
-                let logs: Vec<_> = m.activity_log.drain(..).collect();
-                log::debug!("Received {} activity events", logs.len());
-                for event in logs {
-                    log::debug!(
-                        "Activity: mapping_idx={}, part={:?}, value={}",
-                        event.mapping_idx,
-                        event.part,
-                        event.value
-                    );
+        if let Ok(mut m) = self.midi.lock()
+            && !m.activity_log.is_empty()
+        {
+            let logs: Vec<_> = m.activity_log.drain(..).collect();
+            log::debug!("Received {} activity events", logs.len());
+            for event in logs {
+                log::debug!(
+                    "Activity: mapping_idx={}, part={:?}, value={}",
+                    event.mapping_idx,
+                    event.part,
+                    event.value
+                );
 
-                    if let Some(node_ids) = self.mapping_nodes.get(&event.mapping_idx) {
-                        let target_node_id = match event.part {
-                            eos_midi_bridge::ActivityPart::Trigger => Some(node_ids.trigger),
-                            eos_midi_bridge::ActivityPart::Action => Some(node_ids.action),
-                            eos_midi_bridge::ActivityPart::Output(i) => {
-                                node_ids.outputs.get(i).copied()
-                            }
-                        };
+                if let Some(node_ids) = self.mapping_nodes.get(&event.mapping_idx) {
+                    let target_node_id = match event.part {
+                        eos_midi_bridge::ActivityPart::Trigger => Some(node_ids.trigger),
+                        eos_midi_bridge::ActivityPart::Action => Some(node_ids.action),
+                        eos_midi_bridge::ActivityPart::Output(i) => {
+                            node_ids.outputs.get(i).copied()
+                        }
+                    };
 
-                        if let Some(node_id) = target_node_id {
-                            if let Some(node) = self.snarl.get_node_mut(node_id) {
-                                let live_state = match node {
-                                    eos_midi_bridge::nodes::NodeData::Trigger(_, s) => s,
-                                    eos_midi_bridge::nodes::NodeData::Action(_, s) => s,
-                                    eos_midi_bridge::nodes::NodeData::Output(_, s) => s,
-                                };
-                                live_state.last_value = event.value.clone();
-                                live_state.last_activity = Some(std::time::Instant::now());
-                                log::debug!(
-                                    "Updated node {:?} with value: {}",
-                                    node_id,
-                                    event.value
-                                );
-                            }
-                        } else {
-                            log::warn!(
-                                "No node_id found for mapping_idx={}, part={:?}",
-                                event.mapping_idx,
-                                event.part
-                            );
+                    if let Some(node_id) = target_node_id {
+                        if let Some(node) = self.snarl.get_node_mut(node_id) {
+                            let live_state = match node {
+                                eos_midi_bridge::nodes::NodeData::Trigger(_, s) => s,
+                                eos_midi_bridge::nodes::NodeData::Action(_, s) => s,
+                                eos_midi_bridge::nodes::NodeData::Output(_, s) => s,
+                            };
+                            live_state.last_value = event.value.clone();
+                            live_state.last_activity = Some(std::time::Instant::now());
+                            log::debug!("Updated node {:?} with value: {}", node_id, event.value);
                         }
                     } else {
-                        log::warn!("No mapping found for mapping_idx={}", event.mapping_idx);
+                        log::warn!(
+                            "No node_id found for mapping_idx={}, part={:?}",
+                            event.mapping_idx,
+                            event.part
+                        );
                     }
+                } else {
+                    log::warn!("No mapping found for mapping_idx={}", event.mapping_idx);
                 }
-                ctx.request_repaint();
             }
+            ctx.request_repaint();
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -367,12 +361,11 @@ impl eframe::App for BridgeApp {
                                             ui.label("MIDI Input:");
                                             let mut selected_in =
                                                 self.config_edit.midi_in_name.clone();
-                                            if let Some(ref name) = selected_in {
-                                                if !m.available_in_ports.is_empty()
-                                                    && !m.available_in_ports.contains(name)
-                                                {
-                                                    selected_in = None;
-                                                }
+                                            if let Some(ref name) = selected_in
+                                                && !m.available_in_ports.is_empty()
+                                                && !m.available_in_ports.contains(name)
+                                            {
+                                                selected_in = None;
                                             }
                                             let display_in =
                                                 selected_in.as_deref().unwrap_or("None");
@@ -398,12 +391,11 @@ impl eframe::App for BridgeApp {
                                             ui.label("MIDI Output:");
                                             let mut selected_out =
                                                 self.config_edit.midi_out_name.clone();
-                                            if let Some(ref name) = selected_out {
-                                                if !m.available_out_ports.is_empty()
-                                                    && !m.available_out_ports.contains(name)
-                                                {
-                                                    selected_out = None;
-                                                }
+                                            if let Some(ref name) = selected_out
+                                                && !m.available_out_ports.is_empty()
+                                                && !m.available_out_ports.contains(name)
+                                            {
+                                                selected_out = None;
                                             }
                                             let display_out =
                                                 selected_out.as_deref().unwrap_or("None");
@@ -465,16 +457,17 @@ impl eframe::App for BridgeApp {
                         }
 
                         // Auto-apply changes if config has changed and is valid
-                        if self.config_edit != self.last_applied_config {
-                            if self.config_edit.validate().is_ok() {
-                                if let Err(e) = self.tx_system.blocking_send(
-                                    SystemCommand::Reconfigure(self.config_edit.clone()),
-                                ) {
-                                    error!("Failed to send live reconfiguration command: {}", e);
-                                } else {
-                                    self.last_applied_config = self.config_edit.clone();
-                                    self.status_message = "Settings applied".to_string();
-                                }
+                        if self.config_edit != self.last_applied_config
+                            && self.config_edit.validate().is_ok()
+                        {
+                            if let Err(e) = self
+                                .tx_system
+                                .blocking_send(SystemCommand::Reconfigure(self.config_edit.clone()))
+                            {
+                                error!("Failed to send live reconfiguration command: {}", e);
+                            } else {
+                                self.last_applied_config = self.config_edit.clone();
+                                self.status_message = "Settings applied".to_string();
                             }
                         }
                     }
@@ -492,10 +485,10 @@ impl eframe::App for BridgeApp {
                                 self.snarl_zoom_pending *= 0.8;
                             }
                             ui.separator();
-                            if ui.button("🔄 Refresh Mapping").clicked() {
-                                if let Ok(m) = self.midi.lock() {
-                                    populate_needed = Some(m.profile.clone());
-                                }
+                            if ui.button("🔄 Refresh Mapping").clicked()
+                                && let Ok(m) = self.midi.lock()
+                            {
+                                populate_needed = Some(m.profile.clone());
                             }
                             ui.separator();
                             ui.label("Ctrl + Scroll to zoom, Drag to pan");
@@ -504,10 +497,10 @@ impl eframe::App for BridgeApp {
                         ui.separator();
 
                         // If snarl is empty, populate it automatically
-                        if self.snarl.nodes().next().is_none() {
-                            if let Ok(m) = self.midi.lock() {
-                                populate_needed = Some(m.profile.clone());
-                            }
+                        if self.snarl.nodes().next().is_none()
+                            && let Ok(m) = self.midi.lock()
+                        {
+                            populate_needed = Some(m.profile.clone());
                         }
 
                         let snarl_rect = ui.available_rect_before_wrap();

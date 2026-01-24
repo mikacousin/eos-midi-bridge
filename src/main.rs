@@ -69,16 +69,16 @@ fn main() -> anyhow::Result<()> {
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         loop {
             interval.tick().await;
-            if let Ok(m) = flash_midi.lock() {
-                if m.crossfade_state == CrossfadeState::Pause {
-                    tick = !tick;
-                    let vel = if tick { 127 } else { 0 };
-                    if let Some((note, chan, _)) = m
-                        .profile
-                        .get_midi_output_for_action(crate::controller::LogicalAction::Go)
-                    {
-                        m.send_queue.enqueue(vec![0x90 | chan, note, vel]);
-                    }
+            if let Ok(m) = flash_midi.lock()
+                && m.crossfade_state == CrossfadeState::Pause
+            {
+                tick = !tick;
+                let vel = if tick { 127 } else { 0 };
+                if let Some((note, chan, _)) = m
+                    .profile
+                    .get_midi_output_for_action(crate::controller::LogicalAction::Go)
+                {
+                    m.send_queue.enqueue(vec![0x90 | chan, note, vel]);
                 }
             }
         }
@@ -164,11 +164,11 @@ fn main() -> anyhow::Result<()> {
                             let _ = client.send("/eos/ping", vec![]).await;
 
                             // Check for timeout if we ever received a pong
-                            if let Some(last) = last_heartbeat {
-                                if last.elapsed() > Duration::from_secs(4) {
-                                    let mut m = heartbeat_midi.lock().unwrap();
-                                    m.needs_sync = true; // Retry sync when it comes back
-                                }
+                            if let Some(last) = last_heartbeat
+                                && last.elapsed() > Duration::from_secs(4)
+                            {
+                                let mut m = heartbeat_midi.lock().unwrap();
+                                m.needs_sync = true; // Retry sync when it comes back
                             }
                         }
                         _ = heartbeat_token.cancelled() => break,
@@ -247,10 +247,8 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-            } else {
-                if let Ok(mut m) = supervision_midi.lock() {
-                    m.connection_status = "⚠ MIDI Ports not selected".to_string();
-                }
+            } else if let Ok(mut m) = supervision_midi.lock() {
+                m.connection_status = "⚠ MIDI Ports not selected".to_string();
             }
 
             // Wait for reconfiguration command

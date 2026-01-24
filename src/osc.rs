@@ -55,10 +55,10 @@ impl OscServer {
             tokio::select! {
                 _ = token.cancelled() => break,
                 result = socket.recv_from(&mut buf) => {
-                    if let Ok((size, _)) = result {
-                        if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..size]) {
-                            self.handle_packet(packet, &midi).await;
-                        }
+                    if let Ok((size, _)) = result
+                        && let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..size])
+                    {
+                        self.handle_packet(packet, &midi).await;
                     }
                 }
             }
@@ -136,65 +136,63 @@ impl OscServer {
             }
 
             // Handle Fader Labels: /eos/out/fader/1/{index}/name
-            if msg.addr.starts_with("/eos/out/fader/1/") && msg.addr.ends_with("/name") {
-                if let (Some(f_str), Some(OscType::String(text))) = (parts.get(5), msg.args.first())
+            if msg.addr.starts_with("/eos/out/fader/1/")
+                && msg.addr.ends_with("/name")
+                && let (Some(f_str), Some(OscType::String(text))) = (parts.get(5), msg.args.first())
+                && let Ok(f_num) = f_str.parse::<usize>()
+            {
                 {
-                    if let Ok(f_num) = f_str.parse::<usize>() {
-                        {
-                            let mut m = midi.lock().unwrap();
-                            let eos_bank_size = m.profile.eos_bank_size;
-                            if f_num > 0 && f_num <= eos_bank_size {
-                                let mut text = text.clone();
-                                if text.starts_with("S") {
-                                    let split: Vec<&str> = text.split_whitespace().collect();
-                                    if split.len() > 2 {
-                                        text = split[2..].join(" ");
-                                    }
-                                }
-                                m.fader_names[f_num - 1] = text;
+                    let mut m = midi.lock().unwrap();
+                    let eos_bank_size = m.profile.eos_bank_size;
+                    if f_num > 0 && f_num <= eos_bank_size {
+                        let mut text = text.clone();
+                        if text.starts_with("S") {
+                            let split: Vec<&str> = text.split_whitespace().collect();
+                            if split.len() > 2 {
+                                text = split[2..].join(" ");
                             }
                         }
-
-                        // Check if we should ignore this update to keep the Page number visible
-                        {
-                            let m = midi.lock().unwrap();
-                            let lockout = m
-                                .page_display_time
-                                .saturating_sub(Duration::from_millis(100));
-                            if m.last_page_change.elapsed() < lockout {
-                                return;
-                            }
-                        }
-
-                        // Send to LCD strip if physically available
-                        let should_display = {
-                            let m = midi.lock().unwrap();
-                            if let Some(ref visible) = m.profile.display.visible_faders {
-                                visible.contains(&f_num)
-                            } else {
-                                // Fallback to "all faders that fit on screen have displays"
-                                let lcd_segments =
-                                    m.profile.display.line_length / m.profile.display.strip_width;
-                                f_num <= lcd_segments
-                            }
-                        };
-
-                        if should_display {
-                            let clean_text = {
-                                let m = midi.lock().unwrap();
-                                m.fader_names[f_num - 1].clone()
-                            };
-
-                            let clean_text_stripped = strip_accents(&clean_text);
-                            let line0: String = clean_text_stripped.chars().take(6).collect();
-                            let line1: String =
-                                clean_text_stripped.chars().skip(6).take(6).collect();
-
-                            let m = midi.lock().unwrap();
-                            m.send_to_strip(&line0, 0, f_num - 1);
-                            m.send_to_strip(&line1, 1, f_num - 1);
-                        }
+                        m.fader_names[f_num - 1] = text;
                     }
+                }
+
+                // Check if we should ignore this update to keep the Page number visible
+                {
+                    let m = midi.lock().unwrap();
+                    let lockout = m
+                        .page_display_time
+                        .saturating_sub(Duration::from_millis(100));
+                    if m.last_page_change.elapsed() < lockout {
+                        return;
+                    }
+                }
+
+                // Send to LCD strip if physically available
+                let should_display = {
+                    let m = midi.lock().unwrap();
+                    if let Some(ref visible) = m.profile.display.visible_faders {
+                        visible.contains(&f_num)
+                    } else {
+                        // Fallback to "all faders that fit on screen have displays"
+                        let lcd_segments =
+                            m.profile.display.line_length / m.profile.display.strip_width;
+                        f_num <= lcd_segments
+                    }
+                };
+
+                if should_display {
+                    let clean_text = {
+                        let m = midi.lock().unwrap();
+                        m.fader_names[f_num - 1].clone()
+                    };
+
+                    let clean_text_stripped = strip_accents(&clean_text);
+                    let line0: String = clean_text_stripped.chars().take(6).collect();
+                    let line1: String = clean_text_stripped.chars().skip(6).take(6).collect();
+
+                    let m = midi.lock().unwrap();
+                    m.send_to_strip(&line0, 0, f_num - 1);
+                    m.send_to_strip(&line1, 1, f_num - 1);
                 }
             }
 
@@ -203,16 +201,16 @@ impl OscServer {
             // Move Motorized Faders: /eos/fader/1/{index}
             if !handled && msg.addr.starts_with("/eos/fader/1/") {
                 // For "/eos/fader/1/5", parts are ["", "eos", "fader", "1", "5"] -> index 4
-                if let (Some(f_str), Some(OscType::Float(val))) = (parts.get(4), msg.args.first()) {
-                    if let Ok(f_num) = f_str.parse::<usize>() {
-                        let mut m = midi.lock().unwrap();
-                        let eos_bank_size = m.profile.eos_bank_size;
-                        if f_num > 0 && f_num <= eos_bank_size {
-                            let pitch = (val * 16383.0).round() as i16 - 8192;
-                            // Update physical pitchwheel if a mapping exists for this fader index
-                            m.enqueue_pitchwheel((f_num - 1) as u8, pitch);
-                            m.fader_levels[f_num - 1] = *val;
-                        }
+                if let (Some(f_str), Some(OscType::Float(val))) = (parts.get(4), msg.args.first())
+                    && let Ok(f_num) = f_str.parse::<usize>()
+                {
+                    let mut m = midi.lock().unwrap();
+                    let eos_bank_size = m.profile.eos_bank_size;
+                    if f_num > 0 && f_num <= eos_bank_size {
+                        let pitch = (val * 16383.0).round() as i16 - 8192;
+                        // Update physical pitchwheel if a mapping exists for this fader index
+                        m.enqueue_pitchwheel((f_num - 1) as u8, pitch);
+                        m.fader_levels[f_num - 1] = *val;
                     }
                 }
             }
@@ -301,30 +299,29 @@ impl OscServer {
                             .await;
                     });
                 }
-            } else if msg.addr.starts_with("/eos/out/active/cue") {
-                if let Some(OscType::Float(progress)) = msg.args.get(0) {
-                    let mut m = midi.lock().unwrap();
+            } else if msg.addr.starts_with("/eos/out/active/cue")
+                && let Some(OscType::Float(progress)) = msg.args.first()
+            {
+                let mut m = midi.lock().unwrap();
 
-                    if *progress < 1.0 {
-                        // Activate the intended direction if we are not already in it (or if overriding something other than Pause)
-                        let intended = m.intended_dir;
-                        let last = m.last_applied_dir;
-                        let current = m.crossfade_state;
+                if *progress < 1.0 {
+                    // Activate the intended direction if we are not already in it (or if overriding something other than Pause)
+                    let intended = m.intended_dir;
+                    let last = m.last_applied_dir;
+                    let current = m.crossfade_state;
 
-                        // Only apply change if direction is new OR if we are Inactive
-                        // Respect Pause: If Paused, do not switch unless the intended direction actually changed (e.g. Go -> Back)
-                        if intended != last {
-                            m.set_crossfade_state(intended, false);
-                            m.last_applied_dir = intended;
-                        } else if current == CrossfadeState::Inactive {
-                            // Starting a fade from Inactive
-                            m.set_crossfade_state(intended, false);
-                            m.last_applied_dir = intended;
-                        }
-                    } else {
-                        if m.crossfade_state != CrossfadeState::Inactive {}
-                        m.set_crossfade_state(CrossfadeState::Inactive, false);
+                    // Only apply change if direction is new OR if we are Inactive
+                    // Respect Pause: If Paused, do not switch unless the intended direction actually changed (e.g. Go -> Back)
+                    if intended != last {
+                        m.set_crossfade_state(intended, false);
+                        m.last_applied_dir = intended;
+                    } else if current == CrossfadeState::Inactive {
+                        // Starting a fade from Inactive
+                        m.set_crossfade_state(intended, false);
+                        m.last_applied_dir = intended;
                     }
+                } else {
+                    m.set_crossfade_state(CrossfadeState::Inactive, false);
                 }
             }
         }
