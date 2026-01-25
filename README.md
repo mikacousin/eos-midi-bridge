@@ -7,6 +7,7 @@ A high-performance, asynchronous bridge connecting the **iCon Platform M+** (wit
 
 ## ✨ Key Features
 - **Live Reconfiguration**: Change Eos IP, ports, or MIDI devices on the fly. No application restart required.
+- **Multi-Controller Support**: Simultaneously use multiple supported controllers.
 - **Auto-Hardware Detection**: Real-time monitoring of MIDI connections. Plug your iCon while the app is running, it will be detected instantly.
 - **Bi-directional Motorized Feedback**: Faders move on your iCon when they move in Eos.
 - **D2 Display Support**: Automatically pushes Eos fader labels (e.g., "Front Light", "Haze") to the iCon scribble strips.
@@ -29,15 +30,22 @@ To enable communication, go to **Setup > System > Network > OSC** on your Eos co
 
 ---
 
-## 🎹 iCon Platform M+ Setup
+## 🎹 Control Hardware Setup
 
-Your controller must be in **Mackie Control (MCP)** mode:  
-1. Turn off the iCon.  
-2. Hold down the **Encoder button on Channel 1**.  
-3. Turn on the power.  
-4. Rotate the encoder to select **"MCP"**.  
-5. Press the encoder again to save and exit.  
+### Tested and Supported Controllers
+This bridge has been verified with a multi-controller setup using:
 
+1.  **iCon Platform M+ (with D2 Display)**  
+    *   **Mode**: Mackie Control (MCP).  
+    *   **Features**: Motorized faders, touch sensitivity, text display (D2), navigation buttons.
+    *   *Setup*: Hold Channel 1 Config button while powering on -> Select "MCP".
+
+2.  **Behringer X-Touch Mini**  
+    *   **Mode**: Standard Mode (NOT MC Mode).  
+    *   **Features**: LED Ring feedback ("Fan" style), rotary encoders, buttons.
+    *   *Setup*: Ensure device is in Standard Mode (Layer A/B LEDs active). Global Channel should be **1** (or 0 in internal config).
+
+_Other MIDI controllers can be supported by creating custom JSON profiles in the `profiles/` directory._
 
 
 ---

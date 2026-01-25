@@ -18,7 +18,7 @@ pub struct BridgeApp {
     pub last_applied_config: BridgeConfig,
     pub status_message: String,
     pub eos_ip_edit: String,
-    pub controller_profile_edit: String,
+    pub editing_device: Option<String>,
     pub tx_system: mpsc::Sender<SystemCommand>,
     pub file_dialog: egui_file_dialog::FileDialog,
     active_tab: Tab,
@@ -27,6 +27,7 @@ pub struct BridgeApp {
     pub mapping_nodes: std::collections::HashMap<usize, MappingNodeIds>,
     pub show_quit_confirmation: bool,
     pub allowed_to_close: bool,
+    pub selected_controller_for_graph: Option<String>,
 }
 
 pub struct MappingNodeIds {
@@ -45,7 +46,7 @@ impl BridgeApp {
             midi: midi.clone(),
             last_applied_config: config.clone(),
             eos_ip_edit: config.eos_ip.clone(),
-            controller_profile_edit: config.controller_profile.clone(),
+            editing_device: None,
             config_edit: config,
             status_message: "Ready".to_string(),
             tx_system,
@@ -56,11 +57,15 @@ impl BridgeApp {
             mapping_nodes: std::collections::HashMap::new(),
             show_quit_confirmation: false,
             allowed_to_close: false,
+            selected_controller_for_graph: None,
         };
 
         // Pre-populate the node graph with the current profile
         if let Ok(m) = midi.lock() {
-            app.populate_snarl(&m.profile);
+            if let Some((name, p)) = m.device_profiles.iter().next() {
+                app.selected_controller_for_graph = Some(name.clone());
+                app.populate_snarl(p);
+            }
         }
 
         app
@@ -124,8 +129,18 @@ impl eframe::App for BridgeApp {
             let logs: Vec<_> = m.activity_log.drain(..).collect();
             log::debug!("Received {} activity events", logs.len());
             for event in logs {
+                // Filter by selected controller to avoid cross-talk
+                if let Some(selected) = &self.selected_controller_for_graph {
+                    if event.device_name != *selected {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+
                 log::debug!(
-                    "Activity: mapping_idx={}, part={:?}, value={}",
+                    "Activity: device={}, mapping_idx={}, part={:?}, value={}",
+                    event.device_name,
                     event.mapping_idx,
                     event.part,
                     event.value
@@ -222,12 +237,19 @@ impl eframe::App for BridgeApp {
                             Ok(m) => {
                                 ui.horizontal(|ui| {
                                     ui.heading(format!("Bank: {}", m.fader_page));
-                                    ui.label(format!("(Profile: {})", m.profile.name));
+                                    let profile_names: Vec<String> = m.device_profiles.values().map(|p| p.name.clone()).collect();
+                                    ui.label(format!("(Profiles: {})", profile_names.join(", ")));
                                 });
                                 ui.add_space(10.0);
 
                                 ui.horizontal_top(|ui| {
-                                    let bank_size = m.profile.eos_bank_size;
+                                    // Use max bank size for display
+                                    let mut bank_size = 0;
+                                    for p in m.device_profiles.values() {
+                                        if p.eos_bank_size > bank_size { bank_size = p.eos_bank_size; }
+                                    }
+                                    if bank_size == 0 { bank_size = 10; }
+
                                     for i in 0..bank_size {
                                         let column_width = 75.0;
                                         ui.allocate_ui(egui::vec2(column_width, 220.0), |ui| {
@@ -358,73 +380,64 @@ impl eframe::App for BridgeApp {
                                     .spacing([10.0, 10.0])
                                     .show(ui, |ui| {
                                         if let Ok(m) = self.midi.lock() {
-                                            ui.label("MIDI Input:");
-                                            let mut selected_in =
-                                                self.config_edit.midi_in_name.clone();
-                                            if let Some(ref name) = selected_in
-                                                && !m.available_in_ports.is_empty()
-                                                && !m.available_in_ports.contains(name)
-                                            {
-                                                selected_in = None;
-                                            }
-                                            let display_in =
-                                                selected_in.as_deref().unwrap_or("None");
-                                            egui::ComboBox::from_id_salt("midi_in_select")
-                                                .selected_text(display_in)
-                                                .show_ui(ui, |ui| {
-                                                    ui.selectable_value(
-                                                        &mut selected_in,
-                                                        None,
-                                                        "None",
-                                                    );
-                                                    for port in &m.available_in_ports {
-                                                        ui.selectable_value(
-                                                            &mut selected_in,
-                                                            Some(port.clone()),
-                                                            port,
-                                                        );
-                                                    }
-                                                });
-                                            self.config_edit.midi_in_name = selected_in;
-                                            ui.end_row();
+                                            ui.label("Detected Controllers:");
+                                            ui.vertical(|ui| {
+                                                let mut unique_devices: std::collections::HashSet<
+                                                    String,
+                                                > = std::collections::HashSet::new();
+                                                for p in &m.available_in_ports {
+                                                    unique_devices.insert(p.clone());
+                                                }
+                                                for p in &m.available_out_ports {
+                                                    unique_devices.insert(p.clone());
+                                                }
+                                                let mut sorted_devices: Vec<_> =
+                                                    unique_devices.into_iter().collect();
+                                                sorted_devices.sort();
 
-                                            ui.label("MIDI Output:");
-                                            let mut selected_out =
-                                                self.config_edit.midi_out_name.clone();
-                                            if let Some(ref name) = selected_out
-                                                && !m.available_out_ports.is_empty()
-                                                && !m.available_out_ports.contains(name)
-                                            {
-                                                selected_out = None;
-                                            }
-                                            let display_out =
-                                                selected_out.as_deref().unwrap_or("None");
-                                            egui::ComboBox::from_id_salt("midi_out_select")
-                                                .selected_text(display_out)
-                                                .show_ui(ui, |ui| {
-                                                    ui.selectable_value(
-                                                        &mut selected_out,
-                                                        None,
-                                                        "None",
+                                                if sorted_devices.is_empty() {
+                                                    ui.label(
+                                                        egui::RichText::new("No devices found")
+                                                            .italics(),
                                                     );
-                                                    for port in &m.available_out_ports {
-                                                        ui.selectable_value(
-                                                            &mut selected_out,
-                                                            Some(port.clone()),
-                                                            port,
-                                                        );
-                                                    }
-                                                });
-                                            self.config_edit.midi_out_name = selected_out;
-                                            ui.end_row();
+                                                }
 
-                                            ui.label("Controller Profile:");
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new(&m.profile.name).strong(),
-                                                );
-                                                if ui.button("📂 Change...").clicked() {
-                                                    self.file_dialog.pick_file();
+                                                for device in sorted_devices {
+                                                    let mut enabled = self
+                                                        .config_edit
+                                                        .enabled_devices
+                                                        .contains_key(&device);
+
+                                                    ui.horizontal(|ui| {
+                                                        if ui.checkbox(&mut enabled, &device).changed()
+                                                        {
+                                                            if enabled {
+                                                                if !self
+                                                                    .config_edit
+                                                                    .enabled_devices
+                                                                    .contains_key(&device)
+                                                                {
+                                                                    // Default profile path
+                                                                    self.config_edit
+                                                                        .enabled_devices
+                                                                        .insert(device.clone(), "profiles/icon_platform_m_plus.json".to_string());
+                                                                }
+                                                            } else {
+                                                                self.config_edit
+                                                                    .enabled_devices
+                                                                    .remove(&device);
+                                                            }
+                                                        }
+
+                                                        if enabled {
+                                                            let current_profile = self.config_edit.enabled_devices.get(&device).cloned().unwrap_or_default();
+                                                            ui.label(egui::RichText::new(&current_profile).italics().small());
+                                                            if ui.button("📂").on_hover_text("Change Profile").clicked() {
+                                                                self.editing_device = Some(device.clone());
+                                                                self.file_dialog.pick_file();
+                                                            }
+                                                        }
+                                                    });
                                                 }
                                             });
                                             ui.end_row();
@@ -434,9 +447,12 @@ impl eframe::App for BridgeApp {
                         });
 
                         if let Some(path) = self.file_dialog.update(ctx).picked() {
-                            let path_str = path.to_string_lossy().to_string();
-                            self.controller_profile_edit = path_str.clone();
-                            self.config_edit.controller_profile = path_str;
+                             if let Some(device) = &self.editing_device {
+                                let path_str = path.to_string_lossy().to_string();
+                                self.config_edit.enabled_devices.insert(device.clone(), path_str);
+                             }
+                             // Reset editing device? Maybe not, keep it in case they pick again? No, usually reset.
+                             self.editing_device = None;
                         }
 
                         ui.add_space(20.0);
@@ -478,6 +494,33 @@ impl eframe::App for BridgeApp {
                         self.snarl_zoom_pending *= input_zoom;
 
                         ui.horizontal(|ui| {
+                             // Controller Selector
+                             if let Ok(m) = self.midi.lock() {
+                                 let mut profiles: Vec<_> = m.device_profiles.keys().cloned().collect();
+                                 profiles.sort();
+
+                                 let current_sel = self.selected_controller_for_graph.clone().unwrap_or_default();
+                                 let mut selected = current_sel.clone();
+
+                                 ui.label("Controller:");
+                                 egui::ComboBox::from_id_salt("graph_controller_selector")
+                                     .selected_text(&selected)
+                                     .show_ui(ui, |ui| {
+                                         for p in profiles {
+                                             ui.selectable_value(&mut selected, p.clone(), p);
+                                         }
+                                     });
+
+                                 if selected != current_sel {
+                                     self.selected_controller_for_graph = Some(selected.clone());
+                                     if let Some(p) = m.device_profiles.get(&selected) {
+                                         populate_needed = Some(p.clone());
+                                     }
+                                 }
+                             }
+
+                            ui.separator();
+
                             if ui.button("➕").on_hover_text("Zoom In").clicked() {
                                 self.snarl_zoom_pending *= 1.25;
                             }
@@ -485,10 +528,13 @@ impl eframe::App for BridgeApp {
                                 self.snarl_zoom_pending *= 0.8;
                             }
                             ui.separator();
-                            if ui.button("🔄 Refresh Mapping").clicked()
+                            if ui.button("🔄 Refresh").clicked()
                                 && let Ok(m) = self.midi.lock()
                             {
-                                populate_needed = Some(m.profile.clone());
+                                if let Some(name) = &self.selected_controller_for_graph
+                                   && let Some(p) = m.device_profiles.get(name) {
+                                     populate_needed = Some(p.clone());
+                                }
                             }
                             ui.separator();
                             ui.label("Ctrl + Scroll to zoom, Drag to pan");
@@ -500,7 +546,16 @@ impl eframe::App for BridgeApp {
                         if self.snarl.nodes().next().is_none()
                             && let Ok(m) = self.midi.lock()
                         {
-                            populate_needed = Some(m.profile.clone());
+                             // Try selected first
+                             if let Some(name) = &self.selected_controller_for_graph
+                                && let Some(p) = m.device_profiles.get(name)
+                             {
+                                 populate_needed = Some(p.clone());
+                             } else if let Some((name, p)) = m.device_profiles.iter().next() {
+                                 // Fallback to first
+                                 self.selected_controller_for_graph = Some(name.clone());
+                                 populate_needed = Some(p.clone());
+                             }
                         }
 
                         let snarl_rect = ui.available_rect_before_wrap();

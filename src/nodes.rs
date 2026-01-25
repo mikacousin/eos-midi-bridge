@@ -62,6 +62,7 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
                 Output::MidiPitchwheel { .. } => "Fader FB".to_string(),
                 Output::LcdStrip { strip, .. } => format!("LCD Strip {}", strip),
                 Output::LcdText { text, .. } => format!("LCD Text: {}", text),
+                Output::MidiCc { cc, .. } => format!("MIDI CC {}", cc),
             },
         }
     }
@@ -116,8 +117,8 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
                     Trigger::MidiNote { channel, mode, .. } => {
                         ui.label(format!("Ch: {}, Mode: {:?}", *channel + 1, mode));
                     }
-                    Trigger::MidiCc { channel, .. } => {
-                        ui.label(format!("Ch: {}", *channel + 1));
+                    Trigger::MidiCc { channel, mode, .. } => {
+                        ui.label(format!("Ch: {}, Mode: {:?}", *channel + 1, mode));
                     }
                     Trigger::MidiPitchwheel { channel } => {
                         ui.label(format!("Ch: {}", *channel + 1));
@@ -137,6 +138,9 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
                         ui.label(format!("Ch: {}, Vel: {}", *channel + 1, velocity));
                     }
                     Output::MidiPitchwheel { channel } => {
+                        ui.label(format!("Ch: {}", *channel + 1));
+                    }
+                    Output::MidiCc { channel, .. } => {
                         ui.label(format!("Ch: {}", *channel + 1));
                     }
                     _ => {}

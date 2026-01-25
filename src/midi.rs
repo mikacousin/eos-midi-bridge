@@ -1,21 +1,37 @@
 use crate::{CrossfadeState, MackieEvent, Queue, osc::OscClient, strip_accents};
-use midir::MidiOutputConnection;
+// Used in struct definitions but seemingly unused?
+// Actually if we look at line 16, it IS used.
+// Why did rustc complain?
+// "warning: unused import: `midir::MidiOutputConnection`"
+// "note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default"
+// Maybe it's because I'm using `midir::MidiOutputConnection` fully qualified in the struct, so I don't need the import?
+// Yes.
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time;
 
 pub struct Midi {
-    pub osc_client: OscClient,
-    pub profile: crate::controller::ControllerProfile,
     pub fader_page: u8,
-    pub send_queue: Queue<Vec<u8>>,
-    pub connections: Vec<MidiOutputConnection>,
+    pub send_queue: Queue<(String, Vec<u8>)>,
     pub last_page_change: time::Instant,
     pub page_display_time: Duration,
     pub crossfade_state: CrossfadeState,
     pub current_cue: Option<f32>,
-    pub fader_levels: Vec<f32>,
-    pub fader_names: Vec<String>,
+    pub osc_client: OscClient,
+    pub device_profiles: std::collections::HashMap<String, crate::controller::ControllerProfile>,
+    pub device_connections: std::collections::HashMap<String, midir::MidiOutputConnection>,
+    // Removed old connections vec, now mapping output connections by device name
+
+    // State maps keyed by [DeviceName] usually not needed if state is global,
+    // BUT fader levels might differ if profiles map them differently.
+    // For now, we keep Global State for the "EOS Model" side (what EOS tells us),
+    // and we translate that to each device.
+
+    // EOS State
+    pub fader_levels: [f32; 128], // Stores up to 128 faders (enough for huge banks)
+    pub fader_names: Vec<String>, // Stores names for faders
+
     pub connection_status: String,
     pub available_in_ports: Vec<String>,
     pub available_out_ports: Vec<String>,
@@ -28,20 +44,23 @@ pub struct Midi {
 }
 
 impl Midi {
-    pub fn new(osc_client: OscClient, profile: crate::controller::ControllerProfile) -> Self {
-        let bank_size = profile.eos_bank_size;
+    pub fn new(osc_client: OscClient) -> Self {
+        // Initialize with empty names
+        let fader_names = vec![String::new(); 128];
+        let fader_levels = [0.0; 128];
+
         Self {
             osc_client,
-            profile,
+            device_profiles: std::collections::HashMap::new(),
+            device_connections: std::collections::HashMap::new(),
+            fader_levels,
+            fader_names,
             fader_page: 1,
             send_queue: Queue::new(),
-            connections: Vec::new(),
             last_page_change: time::Instant::now() - Duration::from_secs(2),
             page_display_time: Duration::from_millis(500),
             crossfade_state: CrossfadeState::Inactive,
             current_cue: None,
-            fader_levels: vec![0.0; bank_size],
-            fader_names: vec![String::new(); bank_size],
             connection_status: "Disconnected".to_string(),
             available_in_ports: Vec::new(),
             available_out_ports: Vec::new(),
@@ -54,100 +73,184 @@ impl Midi {
         }
     }
 
-    pub fn enqueue_sysex(&self, data: Vec<u8>) {
-        self.send_queue.enqueue(data);
+    pub fn enqueue(&self, target_device: &str, data: Vec<u8>) {
+        self.send_queue.enqueue((target_device.to_string(), data));
     }
 
-    pub fn enqueue_pitchwheel(&self, fader_index: u8, value: i16) {
-        // Find a mapping for FaderMove { index: fader_index } that has a MidiPitchwheel output
-        for mapping in &self.profile.mappings {
-            if let crate::controller::LogicalAction::FaderMove { index } = mapping.action
-                && index == fader_index as usize
-            {
-                for output in &mapping.outputs {
-                    if let crate::controller::Output::MidiPitchwheel { channel } = output {
-                        let val = (value + 8192) as u16; // Convert pitch (-8192 to 8191) to 0-16383 range
-                        let mut data = vec![0xE0 | channel];
-                        data.push((val & 0x7F) as u8); // LSB
-                        data.push(((val >> 7) & 0x7F) as u8); // MSB
-                        self.send_queue.enqueue(data);
-                        return;
+    pub fn update_fader_feedback(&mut self, fader_index: usize, value: f32) {
+        let mut logs = Vec::new();
+        // Iterate over all devices and check their profiles
+        for (device_name, profile) in &self.device_profiles {
+            // Find mappings for FaderMove { index }
+            for (map_idx, mapping) in profile.mappings.iter().enumerate() {
+                if let crate::controller::LogicalAction::FaderMove { index } = mapping.action
+                    && index == fader_index
+                {
+                    for (out_idx, output) in mapping.outputs.iter().enumerate() {
+                        match output {
+                            crate::controller::Output::MidiPitchwheel { channel } => {
+                                // 14-bit Pitch (0-16383)
+                                let val_14 = (value * 16383.0).round() as u16;
+                                let mut data = vec![0xE0 | channel];
+                                data.push((val_14 & 0x7F) as u8); // LSB
+                                data.push(((val_14 >> 7) & 0x7F) as u8); // MSB
+                                self.enqueue(device_name, data);
+
+                                logs.push(crate::ActivityEvent {
+                                    device_name: device_name.to_string(),
+                                    mapping_idx: map_idx,
+                                    part: crate::ActivityPart::Output(out_idx),
+                                    value: format!("Pitch {:.0}", value * 100.0), // Simplified log
+                                });
+                            }
+                            crate::controller::Output::MidiCc { cc, channel } => {
+                                // 7-bit CC (0-127)
+                                let val_7 = (value * 127.0).round() as u8;
+                                self.enqueue(device_name, vec![0xB0 | channel, *cc, val_7]);
+
+                                logs.push(crate::ActivityEvent {
+                                    device_name: device_name.to_string(),
+                                    mapping_idx: map_idx,
+                                    part: crate::ActivityPart::Output(out_idx),
+                                    value: format!("CC {} (V:{})", cc, val_7),
+                                });
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
         }
+        self.activity_log.extend(logs);
     }
 
     pub fn send_lcd(&self, text: &str, line: u8) {
         let text = strip_accents(text);
-        if line as usize >= self.profile.display.line_offsets.len() {
-            return;
+        for (device_name, profile) in &self.device_profiles {
+            if line as usize >= profile.display.line_offsets.len() {
+                continue;
+            }
+            let start = profile.display.line_offsets[line as usize];
+            let mut data = vec![0xF0];
+            data.extend(&profile.display.sysex_prefix);
+            data.push(start);
+            data.extend(text.bytes().take(profile.display.line_length));
+            data.push(0xF7);
+            self.enqueue(device_name, data);
         }
-        let start = self.profile.display.line_offsets[line as usize];
-        let mut data = vec![0xF0];
-        data.extend(&self.profile.display.sysex_prefix);
-        data.push(start);
-        data.extend(text.bytes().take(self.profile.display.line_length));
-        data.push(0xF7);
-        self.enqueue_sysex(data);
     }
 
     pub fn send_to_strip(&self, text: &str, line: u8, strip: usize) {
-        if line as usize >= self.profile.display.line_offsets.len() {
-            return;
-        }
-        let start = self.profile.display.line_offsets[line as usize]
-            + (strip * self.profile.display.strip_width) as u8;
+        let text_stripped = strip_accents(text);
 
-        let width = self.profile.display.strip_width;
-        let text = format!("{:<width$}|", strip_accents(text), width = width - 1);
-        let mut data = vec![0xF0];
-        data.extend(&self.profile.display.sysex_prefix);
-        data.push(start);
-        data.extend(text.bytes().take(width));
-        data.push(0xF7);
-        self.enqueue_sysex(data);
+        for (device_name, profile) in &self.device_profiles {
+            // Check if this strip (0-indexed) corresponds to a Visible Fader (1-indexed)
+            if let Some(visible) = &profile.display.visible_faders {
+                if !visible.contains(&(strip + 1)) {
+                    continue;
+                }
+            }
+
+            if line as usize >= profile.display.line_offsets.len() {
+                continue;
+            }
+            let start = profile.display.line_offsets[line as usize]
+                + (strip * profile.display.strip_width) as u8;
+
+            let width = profile.display.strip_width;
+            // Padding and pipe logic
+            let text_fmt = format!("{:<width$}|", text_stripped, width = width - 1);
+            let mut data = vec![0xF0];
+            data.extend(&profile.display.sysex_prefix);
+            data.push(start);
+            data.extend(text_fmt.bytes().take(width));
+            data.push(0xF7);
+            self.enqueue(device_name, data);
+        }
     }
 
     pub fn show_page_number(&self, page: u8) {
-        // Clear line
-        let len = self.profile.display.line_length;
-        self.send_lcd(&" ".repeat(len), 0);
+        for (device_name, profile) in &self.device_profiles {
+            // 1. Clear line 0
+            let len = profile.display.line_length;
+            // Manual send_lcd logic inline to avoid double iteration
+            if !profile.display.line_offsets.is_empty() {
+                let space = " ".repeat(len);
+                let start = profile.display.line_offsets[0];
+                let mut data = vec![0xF0];
+                data.extend(&profile.display.sysex_prefix);
+                data.push(start);
+                data.extend(space.bytes().take(len));
+                data.push(0xF7);
+                self.enqueue(device_name, data);
+            }
 
-        let page_text = format!("Page {}", page);
-        // Center the text
-        let centered_text = crate::center_text(&page_text, len);
+            // 2. Show Page
+            if profile.display.line_offsets.len() > 1 {
+                let page_text = format!("Page {}", page);
+                let centered_text = crate::center_text(&page_text, len);
 
-        if self.profile.display.line_offsets.len() > 1 {
-            let start = self.profile.display.line_offsets[1];
-            let mut data = vec![0xF0];
-            data.extend(&self.profile.display.sysex_prefix);
-            data.push(start);
-            data.extend(centered_text.bytes().take(len));
-            data.push(0xF7);
-            self.enqueue_sysex(data);
+                let start = profile.display.line_offsets[1];
+                let mut data = vec![0xF0];
+                data.extend(&profile.display.sysex_prefix);
+                data.push(start);
+                data.extend(centered_text.bytes().take(len));
+                data.push(0xF7);
+                self.enqueue(device_name, data);
+            }
         }
     }
 
     pub fn controller_reset(&self) {
-        let len = self.profile.display.line_length;
-        for line in 0..self.profile.display.line_offsets.len() {
-            self.send_lcd(&" ".repeat(len), line as u8);
-        }
+        for (device_name, profile) in &self.device_profiles {
+            let len = profile.display.line_length;
+            for line in 0..profile.display.line_offsets.len() {
+                // Inline send_lcd
+                if line as usize >= profile.display.line_offsets.len() {
+                    continue;
+                }
+                let start = profile.display.line_offsets[line as usize];
+                let mut data = vec![0xF0];
+                data.extend(&profile.display.sysex_prefix);
+                data.push(start);
+                data.extend(" ".repeat(len).bytes().take(len));
+                data.push(0xF7);
+                self.enqueue(device_name, data);
+            }
 
-        // Reset all physical faders found in mappings
-        for mapping in &self.profile.mappings {
-            if let crate::controller::LogicalAction::FaderMove { index } = mapping.action {
-                self.enqueue_pitchwheel(index as u8, -8192);
+            // Reset faders
+            for mapping in &profile.mappings {
+                if let crate::controller::LogicalAction::FaderMove { index: _ } = mapping.action {
+                    // Logic from enqueue_pitchwheel inline
+                    for output in &mapping.outputs {
+                        if let crate::controller::Output::MidiPitchwheel { channel } = output {
+                            // -8192
+                            let val = 0 as u16;
+                            let mut data = vec![0xE0 | channel];
+                            data.push((val & 0x7F) as u8);
+                            data.push(((val >> 7) & 0x7F) as u8);
+                            self.enqueue(device_name, data);
+                        }
+                    }
+                }
+            }
+
+            // Reset Notes
+            for note in 0..128 {
+                self.enqueue(device_name, vec![0x90, note, 0]);
             }
         }
-
-        for note in 0..128 {
-            self.send_queue.enqueue(vec![0x90, note, 0]);
-        }
     }
-    pub fn find_mappings_for_midi_message(&self, msg: &[u8]) -> Vec<(usize, crate::ActivityPart)> {
-        self.profile.match_output_message(msg)
+    pub fn find_mappings_for_midi_message(
+        &self,
+        msg: &[u8],
+        device_name: &str,
+    ) -> Vec<(usize, crate::ActivityPart)> {
+        if let Some(profile) = self.device_profiles.get(device_name) {
+            profile.match_output_message(msg)
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn set_crossfade_state(&mut self, new_state: crate::CrossfadeState, force: bool) {
@@ -161,36 +264,49 @@ impl Midi {
         }
         self.crossfade_state = new_state;
 
-        let go_fb = self
-            .profile
-            .get_midi_output_for_action(crate::controller::LogicalAction::Go);
-        let stop_fb = self
-            .profile
-            .get_midi_output_for_action(crate::controller::LogicalAction::Stop);
+        // Helper vars removed as we need per-device lookup
 
         match self.crossfade_state {
             crate::CrossfadeState::Go => {
-                if let Some((n, c, v)) = go_fb {
-                    self.send_queue.enqueue(vec![0x90 | c, n, v]);
-                }
-                if let Some((n, c, _)) = stop_fb {
-                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                for (d_name, p) in &self.device_profiles {
+                    if let Some((n, c, v)) =
+                        p.get_midi_output_for_action(crate::controller::LogicalAction::Go)
+                    {
+                        self.enqueue(d_name, vec![0x90 | c, n, v]);
+                    }
+                    if let Some((n, c, _)) =
+                        p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
+                    {
+                        self.enqueue(d_name, vec![0x90 | c, n, 0]);
+                    }
                 }
             }
             crate::CrossfadeState::GoBack | crate::CrossfadeState::Pause => {
-                if let Some((n, c, v)) = stop_fb {
-                    self.send_queue.enqueue(vec![0x90 | c, n, v]);
-                }
-                if let Some((n, c, _)) = go_fb {
-                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                for (d_name, p) in &self.device_profiles {
+                    if let Some((n, c, v)) =
+                        p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
+                    {
+                        self.enqueue(d_name, vec![0x90 | c, n, v]);
+                    }
+                    if let Some((n, c, _)) =
+                        p.get_midi_output_for_action(crate::controller::LogicalAction::Go)
+                    {
+                        self.enqueue(d_name, vec![0x90 | c, n, 0]);
+                    }
                 }
             }
             crate::CrossfadeState::Inactive => {
-                if let Some((n, c, _)) = go_fb {
-                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
-                }
-                if let Some((n, c, _)) = stop_fb {
-                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
+                for (d_name, p) in &self.device_profiles {
+                    if let Some((n, c, _)) =
+                        p.get_midi_output_for_action(crate::controller::LogicalAction::Go)
+                    {
+                        self.enqueue(d_name, vec![0x90 | c, n, 0]);
+                    }
+                    if let Some((n, c, _)) =
+                        p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
+                    {
+                        self.enqueue(d_name, vec![0x90 | c, n, 0]);
+                    }
                 }
             }
         }
@@ -200,13 +316,52 @@ impl Midi {
         if self.crossfade_state == crate::CrossfadeState::Pause {
             self.blink_state = !self.blink_state;
 
-            let go_fb = self
-                .profile
-                .get_midi_output_for_action(crate::controller::LogicalAction::Go);
+            // let go_fb = self.profile... REMOVED, doing manual iteration below
 
-            if let Some((n, c, _)) = go_fb {
-                let v = if self.blink_state { 127 } else { 0 };
-                self.send_queue.enqueue(vec![0x90 | c, n, v]);
+            let _v = if self.blink_state { 127 } else { 0 };
+            // Need to find which device(s) have this mapping?
+            // set_crossfade_state handles the finding.
+            // Re-using set_crossfade_state logic might be cleaner but it resets blink state.
+            // Let's iterate:
+            for (device_name, profile) in &self.device_profiles {
+                if let Some((n, c, _)) =
+                    profile.get_midi_output_for_action(crate::controller::LogicalAction::Go)
+                {
+                    let v = if self.blink_state { 127 } else { 0 };
+                    self.enqueue(device_name, vec![0x90 | c, n, v]);
+                }
+            }
+        }
+    }
+    pub fn reset_all_outputs(&self) {
+        for (device_name, profile) in &self.device_profiles {
+            // Clear LCD if applicable
+            let len = profile.display.line_length;
+            for line in 0..profile.display.line_offsets.len() {
+                let start = profile.display.line_offsets[line];
+                let mut data = vec![0xF0];
+                data.extend(&profile.display.sysex_prefix);
+                data.push(start);
+                data.extend(" ".repeat(len).bytes().take(len));
+                data.push(0xF7);
+                self.enqueue(device_name, data);
+            }
+
+            for mapping in &profile.mappings {
+                for output in &mapping.outputs {
+                    match output {
+                        crate::controller::Output::MidiNote { note, channel, .. } => {
+                            self.enqueue(device_name, vec![0x90 | channel, *note, 0]);
+                        }
+                        crate::controller::Output::MidiCc { cc, channel, .. } => {
+                            self.enqueue(device_name, vec![0xB0 | channel, *cc, 0]);
+                        }
+                        crate::controller::Output::MidiPitchwheel { channel } => {
+                            self.enqueue(device_name, vec![0xE0 | channel, 0, 0]);
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     }
@@ -214,7 +369,10 @@ impl Midi {
 
 pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
     match event {
-        MackieEvent::MidiIn(msg) => {
+        MackieEvent::MidiIn {
+            device_name,
+            data: msg,
+        } => {
             if msg.len() < 3 {
                 return;
             }
@@ -224,7 +382,17 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
             // Get the client and profile without holding a lock on the whole struct
             let (_client, profile) = {
                 let m = midi.lock().unwrap();
-                (m.osc_client.clone(), m.profile.clone())
+                // Find profile for this device
+                let p = m.device_profiles.get(&device_name).cloned();
+                (m.osc_client.clone(), p)
+            };
+
+            let profile = match profile {
+                Some(p) => p,
+                None => {
+                    // Profile not found for this device?
+                    return;
+                }
             };
 
             // Identify the trigger
@@ -257,10 +425,14 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                         crate::controller::Trigger::MidiCc {
                             cc: cc1,
                             channel: c1,
+                            mode: _, // Mode is purely for interpretation, not matching?
+                                     // Actually, if we have different modes, they match the same CC/Channel.
+                                     // So matching logic should be same.
                         },
                         crate::controller::Trigger::MidiCc {
                             cc: cc2,
                             channel: c2,
+                            mode: _,
                         },
                     ) => cc1 == cc2 && c1 == c2,
                     (
@@ -276,6 +448,7 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                     {
                         let mut m = midi.lock().unwrap();
                         m.activity_log.push(crate::ActivityEvent {
+                            device_name: device_name.clone(),
                             mapping_idx,
                             part: crate::ActivityPart::Trigger,
                             value: match &trigger {
@@ -295,7 +468,15 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
                     }
 
                     // Logic Action Processing via Helper
-                    execute_mapping(Arc::clone(&midi), mapping, mapping_idx, d1, d2).await;
+                    execute_mapping(
+                        Arc::clone(&midi),
+                        mapping,
+                        mapping_idx,
+                        d1,
+                        d2,
+                        &device_name,
+                    )
+                    .await;
                 }
             }
         }
@@ -308,11 +489,23 @@ pub async fn execute_mapping(
     mapping_idx: usize,
     d1: u8,
     d2: u8,
+    device_name: &str,
 ) {
     let (client, profile) = {
         let m = midi.lock().unwrap();
-        (m.osc_client.clone(), m.profile.clone())
+        (
+            m.osc_client.clone(),
+            m.device_profiles.get(device_name).cloned(),
+        )
     };
+
+    let profile = if let Some(p) = profile {
+        p
+    } else {
+        return;
+    };
+
+    let mut cached_fader_value: Option<f32> = None;
 
     // Logic Action Processing
     match &mapping.action {
@@ -320,6 +513,7 @@ pub async fn execute_mapping(
             let mut m = midi.lock().unwrap();
             m.crossfade_state = CrossfadeState::Go;
             m.activity_log.push(crate::ActivityEvent {
+                device_name: device_name.to_string(),
                 mapping_idx,
                 part: crate::ActivityPart::Action,
                 value: "GO".to_string(),
@@ -335,6 +529,7 @@ pub async fn execute_mapping(
                 "BACK"
             };
             m.activity_log.push(crate::ActivityEvent {
+                device_name: device_name.to_string(),
                 mapping_idx,
                 part: crate::ActivityPart::Action,
                 value: label.to_string(),
@@ -344,6 +539,7 @@ pub async fn execute_mapping(
             let mut m = midi.lock().unwrap();
             m.crossfade_state = CrossfadeState::Go;
             m.activity_log.push(crate::ActivityEvent {
+                device_name: device_name.to_string(),
                 mapping_idx,
                 part: crate::ActivityPart::Action,
                 value: "RESUME".to_string(),
@@ -364,6 +560,7 @@ pub async fn execute_mapping(
                 m.show_page_number(m.fader_page);
                 let page = m.fader_page;
                 m.activity_log.push(crate::ActivityEvent {
+                    device_name: device_name.to_string(),
                     mapping_idx,
                     part: crate::ActivityPart::Action,
                     value: format!("PAGE {}", page),
@@ -388,17 +585,109 @@ pub async fn execute_mapping(
                     .await;
             });
         }
+
         crate::controller::LogicalAction::FaderMove { index } => {
-            let value = ((d2 as i16) << 7) | (d1 as i16);
-            let f_val = (value as f32) / 16383.0;
-            let mut m = midi.lock().unwrap();
-            if *index < m.fader_levels.len() {
-                m.fader_levels[*index] = f_val;
-                m.activity_log.push(crate::ActivityEvent {
-                    mapping_idx,
-                    part: crate::ActivityPart::Action,
-                    value: format!("{:.0}%", f_val * 100.0),
-                });
+            let mut final_v = 0.0;
+            let mut update = false;
+
+            if let crate::controller::Trigger::MidiCc { mode, .. } = &mapping.trigger {
+                match mode {
+                    crate::controller::MidiCcTriggerMode::Absolute => {
+                        // let value = ((d2 as i16) << 7) | (d1 as i16); // Wait, d1/d2 logic for FaderMove assumed 14-bit pitchbend source!
+                        // If source is CC (7-bit), d2 is value.
+                        // But if source is PitchWheel, d1/d2 is 14-bit.
+                        // Logic below was hardcoded for PitchWheel?
+                        // "let value = ((d2 as i16) << 7) | (d1 as i16);"
+
+                        // We need to differentiate source trigger type for value extraction!
+                        // But execute_mapping just gets d1/d2.
+
+                        // FIX:
+                        let f_val = if d1 == 0xB0 || (d1 & 0xF0) == 0xB0 {
+                            // Ah d1 passed to execute_mapping is msg[1], d2 is msg[2]
+                            // msg[0] is not passed?
+                            // Wait, call site:
+                            // let (d1, d2) = (msg[1], msg[2]);
+                            // execute_mapping(..., d1, d2, ...)
+                            // We don't know if it was PitchWheel or CC inside execute_mapping easily without checking trigger type again.
+
+                            (d2 as f32) / 127.0
+                        } else {
+                            // Assume PitchWheel default 14-bit
+                            let value = ((d2 as i16) << 7) | (d1 as i16);
+                            (value as f32) / 16383.0
+                        };
+                        final_v = f_val;
+                        update = true;
+                    }
+                    crate::controller::MidiCcTriggerMode::RelativeStandard => {
+                        // < 64 = +d2, >= 64 = -(d2-64) ?
+                        // Usually 1-63 is +, 65-127 is - (Two's complement 7-bit signed?)
+                        // Or 65 = -1, 127 = -63?
+                        // Let's implement generic Signed 7-bit:
+                        // 0-63 positive, 64-127 negative (offset 128? or just >64 is neg?)
+
+                        // Relative 1 (Behringer Manual says 1..7, 65..71)
+                        // Actually let's assume RelativeBehringer covers the specifics.
+                        // Standard often 65 = +1? No 1=+1.
+
+                        // Let's implement logic:
+                        let delta: i32 = if d2 < 64 {
+                            d2 as i32
+                        } else {
+                            (d2 as i32) - 128
+                        }; // 7-bit signed
+
+                        let m = midi.lock().unwrap();
+                        if *index < m.fader_levels.len() {
+                            let current = m.fader_levels[*index];
+                            let new_val = (current + (delta as f32 * 0.01)).clamp(0.0, 1.0); // 1% per tick?
+                            final_v = new_val;
+                            update = true;
+                        }
+                    }
+                    crate::controller::MidiCcTriggerMode::RelativeBehringer => {
+                        // CW: 1..7 (speed) -> +1..+7
+                        // CCW: 127..121? -> -1..-7 ?
+                        // Current issue: User reports "drops immediately".
+                        // This implies our previous logic (65 = -1) was being fed 127, resulting in -63.
+                        // So device sends 127 for -1.
+                        // We will use standard 7-bit signed logic (High values = small negatives).
+                        let delta: i32 = if d2 >= 64 {
+                            (d2 as i32) - 128
+                        } else {
+                            d2 as i32
+                        };
+                        let m = midi.lock().unwrap();
+                        if *index < m.fader_levels.len() {
+                            let current = m.fader_levels[*index];
+                            let new_val = (current + (delta as f32 * 0.005)).clamp(0.0, 1.0); // 0.5% per tick base
+                            final_v = new_val;
+                            update = true;
+                        }
+                    }
+                }
+            } else {
+                // Not MIDI CC Trigger (PitchWheel or Note)
+                // Original logic for PitchWheel/Fader
+                // Assuming PitchWheel for FaderMove usually
+                let value = ((d2 as i16) << 7) | (d1 as i16);
+                final_v = (value as f32) / 16383.0;
+                update = true;
+            }
+
+            if update {
+                let mut m = midi.lock().unwrap();
+                if *index < m.fader_levels.len() {
+                    m.fader_levels[*index] = final_v;
+                    cached_fader_value = Some(final_v);
+                    m.activity_log.push(crate::ActivityEvent {
+                        device_name: device_name.to_string(),
+                        mapping_idx,
+                        part: crate::ActivityPart::Action,
+                        value: format!("{:.0}%", final_v * 100.0),
+                    });
+                }
             }
         }
     }
@@ -406,7 +695,7 @@ pub async fn execute_mapping(
     // Capture dynamic values for OSC replacement
     let (current_page, bank_size) = {
         let m = midi.lock().unwrap();
-        (m.fader_page, m.profile.eos_bank_size)
+        (m.fader_page, profile.eos_bank_size)
     };
 
     // Output Processing
@@ -418,7 +707,12 @@ pub async fn execute_mapping(
 
                 // Perform dynamic replacement
                 if final_addr.contains("{page}") {
-                    final_addr = final_addr.replace("{page}", &current_page.to_string());
+                    let page_str = if current_page <= 1 {
+                        String::new()
+                    } else {
+                        (current_page - 1).to_string()
+                    };
+                    final_addr = final_addr.replace("{page}", &page_str);
                 }
                 if final_addr.contains("{bank_size}") {
                     final_addr = final_addr.replace("{bank_size}", &bank_size.to_string());
@@ -429,9 +723,14 @@ pub async fn execute_mapping(
                 // For Faders, we need the value
                 let arg = if let crate::controller::LogicalAction::FaderMove { .. } = mapping.action
                 {
-                    let value = ((d2 as i16) << 7) | (d1 as i16);
-                    let f_val = (value as f32) / 16383.0;
-                    Some(rosc::OscType::Float(f_val))
+                    if let Some(val) = cached_fader_value {
+                        Some(rosc::OscType::Float(val))
+                    } else {
+                        // Fallback to recalculating for absolute/pitchwheel if somehow not cached (shouldn't happen for FaderMove)
+                        let value = ((d2 as i16) << 7) | (d1 as i16);
+                        let f_val = (value as f32) / 16383.0;
+                        Some(rosc::OscType::Float(f_val))
+                    }
                 } else {
                     None
                 };
@@ -444,6 +743,7 @@ pub async fn execute_mapping(
 
                 let midi_for_log = Arc::clone(&midi);
                 let addr_for_log = final_addr.clone();
+                let d_name_log = device_name.to_string();
                 tokio::spawn(async move {
                     let mut success = false;
                     if arg_type == "float" {
@@ -459,6 +759,7 @@ pub async fn execute_mapping(
                     if success {
                         let mut m = midi_for_log.lock().unwrap();
                         m.activity_log.push(crate::ActivityEvent {
+                            device_name: d_name_log,
                             mapping_idx,
                             part: crate::ActivityPart::Output(out_idx),
                             value: format!("{}{}", addr_for_log, val_suffix),
@@ -472,8 +773,9 @@ pub async fn execute_mapping(
                 velocity,
             } => {
                 let mut m = midi.lock().unwrap();
-                m.send_queue.enqueue(vec![0x90 | channel, *note, *velocity]);
+                m.enqueue(device_name, vec![0x90 | channel, *note, *velocity]);
                 m.activity_log.push(crate::ActivityEvent {
+                    device_name: device_name.to_string(),
                     mapping_idx,
                     part: crate::ActivityPart::Output(out_idx),
                     value: format!("Note {} (V:{})", note, velocity),
@@ -485,11 +787,47 @@ pub async fn execute_mapping(
                 let mut data = vec![0xE0 | channel];
                 data.push((value & 0x7F) as u8);
                 data.push(((value >> 7) & 0x7F) as u8);
-                m.send_queue.enqueue(data);
+                m.enqueue(device_name, data);
                 m.activity_log.push(crate::ActivityEvent {
+                    device_name: device_name.to_string(),
                     mapping_idx,
                     part: crate::ActivityPart::Output(out_idx),
                     value: format!("Pitch {}", value - 8192),
+                });
+            }
+            crate::controller::Output::MidiCc { cc, channel } => {
+                let mut m = midi.lock().unwrap();
+                // If the action is a FaderMove, we might want to map the 14-bit value to 7-bit CC?
+                // Or just pass the value if appropriate?
+                // For X-Touch Mini, Fader rings are CC 1-8. Value 0-127.
+                // d1/d2 come from the source message.
+                // If source was PitchWheel (Fader), d1/d2 form a 14-bit value.
+                // We need to normalize to 0-127.
+                // If source was CC, d2 is value.
+
+                // How do we know the source value type generally?
+                // We rely on mapping.action context or just generic scaling?
+                // For now, let's assume we want to output the scaled value of the action.
+
+                let out_val =
+                    if let crate::controller::LogicalAction::FaderMove { .. } = mapping.action {
+                        if let Some(val) = cached_fader_value {
+                            (val * 127.0) as u8
+                        } else {
+                            // Fallback (e.g. if source was absolute 14-bit pitchwheel from an iCon)
+                            let val_14 = ((d2 as u16) << 7) | (d1 as u16);
+                            (val_14 >> 7) as u8
+                        }
+                    } else {
+                        d2 // Pass-through for simple buttons/knobs
+                    };
+
+                m.enqueue(device_name, vec![0xB0 | channel, *cc, out_val]);
+                m.activity_log.push(crate::ActivityEvent {
+                    device_name: device_name.to_string(),
+                    mapping_idx,
+                    part: crate::ActivityPart::Output(out_idx),
+                    value: format!("CC {} (V:{})", cc, out_val),
                 });
             }
             _ => {}

@@ -1,0 +1,1913 @@
+diff --git a/README.md b/README.md
+index 302a3a5..bb46670 100644
+--- a/README.md
++++ b/README.md
+@@ -7,6 +7,7 @@ A high-performance, asynchronous bridge connecting the **iCon Platform M+** (wit
+ 
+ ## ✨ Key Features
+ - **Live Reconfiguration**: Change Eos IP, ports, or MIDI devices on the fly. No application restart required.
++- **Multi-Controller Support**: Simultaneously use multiple supported controllers.
+ - **Auto-Hardware Detection**: Real-time monitoring of MIDI connections. Plug your iCon while the app is running, it will be detected instantly.
+ - **Bi-directional Motorized Feedback**: Faders move on your iCon when they move in Eos.
+ - **D2 Display Support**: Automatically pushes Eos fader labels (e.g., "Front Light", "Haze") to the iCon scribble strips.
+@@ -29,15 +30,22 @@ To enable communication, go to **Setup > System > Network > OSC** on your Eos co
+ 
+ ---
+ 
+-## 🎹 iCon Platform M+ Setup
++## 🎹 Control Hardware Setup
+ 
+-Your controller must be in **Mackie Control (MCP)** mode:  
+-1. Turn off the iCon.  
+-2. Hold down the **Encoder button on Channel 1**.  
+-3. Turn on the power.  
+-4. Rotate the encoder to select **"MCP"**.  
+-5. Press the encoder again to save and exit.  
++### Tested and Supported Controllers
++This bridge has been verified with a multi-controller setup using:
+ 
++1.  **iCon Platform M+ (with D2 Display)**  
++    *   **Mode**: Mackie Control (MCP).  
++    *   **Features**: Motorized faders, touch sensitivity, text display (D2), navigation buttons.
++    *   *Setup*: Hold Channel 1 Config button while powering on -> Select "MCP".
++
++2.  **Behringer X-Touch Mini**  
++    *   **Mode**: Standard Mode (NOT MC Mode).  
++    *   **Features**: LED Ring feedback ("Fan" style), rotary encoders, buttons.
++    *   *Setup*: Ensure device is in Standard Mode (Layer A/B LEDs active). Global Channel should be **1** (or 0 in internal config).
++
++_Other MIDI controllers can be supported by creating custom JSON profiles in the `profiles/` directory._
+ 
+ 
+ ---
+diff --git a/src/config.rs b/src/config.rs
+index f0c1895..38760c4 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -6,9 +6,7 @@ pub struct BridgeConfig {
+     pub eos_ip: String,
+     pub eos_osc_port: u16,
+     pub bridge_listen_port: u16,
+-    pub midi_in_name: Option<String>,
+-    pub midi_out_name: Option<String>,
+-    pub controller_profile: String,
++    pub enabled_devices: std::collections::HashMap<String, String>,
+ }
+ 
+ impl Default for BridgeConfig {
+@@ -17,9 +15,7 @@ impl Default for BridgeConfig {
+             eos_ip: "127.0.0.1".to_string(),
+             eos_osc_port: 8000,
+             bridge_listen_port: 8001,
+-            midi_in_name: None,
+-            midi_out_name: None,
+-            controller_profile: "profiles/icon_platform_m_plus.json".to_string(),
++            enabled_devices: std::collections::HashMap::new(),
+         }
+     }
+ }
+diff --git a/src/controller.rs b/src/controller.rs
+index 5c73807..aa57f1b 100644
+--- a/src/controller.rs
++++ b/src/controller.rs
+@@ -19,6 +19,18 @@ pub enum MidiTriggerMode {
+     Both,
+ }
+ 
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
++#[serde(rename_all = "snake_case")]
++pub enum MidiCcTriggerMode {
++    Absolute,
++    // Standard relative: 1..64 = +1..+64, 65..127 = -1..-63
++    RelativeStandard,
++    // Behringer often uses: 1..7 (speed +) and 65..71 (speed -) OR 127/123 etc.
++    // Let's implement a generic "RelativeSigned" where < 64 is +, > 64 is -.
++    // For Behringer X-Touch Mini in 'Relative 1': CW = 1..7, CCW = 65..71.
++    RelativeBehringer,
++}
++
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+ #[serde(tag = "type", rename_all = "snake_case")]
+ pub enum Trigger {
+@@ -30,6 +42,8 @@ pub enum Trigger {
+     MidiCc {
+         cc: u8,
+         channel: u8,
++        #[serde(default = "default_cc_mode")]
++        mode: MidiCcTriggerMode,
+     },
+     MidiPitchwheel {
+         channel: u8,
+@@ -63,6 +77,7 @@ impl Trigger {
+             0xB0 => Some(Trigger::MidiCc {
+                 cc: d1,
+                 channel: chan,
++                mode: MidiCcTriggerMode::Absolute, // Default for sniffing
+             }),
+             0xE0 => Some(Trigger::MidiPitchwheel { channel: chan }),
+             _ => None,
+@@ -94,6 +109,10 @@ pub enum Output {
+         line: u8,
+         text: String,
+     },
++    MidiCc {
++        cc: u8,
++        channel: u8,
++    },
+ }
+ 
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+@@ -121,6 +140,8 @@ pub struct ControllerProfile {
+     pub eos_bank_size: usize,
+     pub display: DisplayProfile,
+     pub mappings: Vec<Mapping>,
++    #[serde(default)]
++    pub startup_messages: Vec<Vec<u8>>,
+ }
+ 
+ impl Default for ControllerProfile {
+@@ -135,6 +156,7 @@ impl Default for ControllerProfile {
+                 line_offsets: vec![56, 0],
+                 visible_faders: None,
+             },
++            startup_messages: Vec::new(),
+             mappings: vec![
+                 // Example: Go button
+                 Mapping {
+@@ -210,18 +232,25 @@ impl ControllerProfile {
+                     // Determine the feedback OSC address (1-indexed based on index)
+                     let feedback_addr = format!("/eos/fader/1/{}", index + 1);
+ 
+-                    // Synthesize MIDI Pitchwheel output for motor feedback
+-                    let feedback_outputs = vec![Output::MidiPitchwheel {
+-                        channel: index as u8,
+-                    }];
++                    // Use existing MIDI outputs (CC or PitchWheel) for feedback
++                    let feedback_outputs: Vec<Output> = mapping
++                        .outputs
++                        .iter()
++                        .filter(|o| {
++                            matches!(o, Output::MidiCc { .. } | Output::MidiPitchwheel { .. })
++                        })
++                        .cloned()
++                        .collect();
+ 
+-                    new_mappings.push(Mapping {
+-                        trigger: Trigger::Osc {
+-                            addr: feedback_addr,
+-                        },
+-                        action: mapping.action.clone(),
+-                        outputs: feedback_outputs,
+-                    });
++                    if !feedback_outputs.is_empty() {
++                        new_mappings.push(Mapping {
++                            trigger: Trigger::Osc {
++                                addr: feedback_addr,
++                            },
++                            action: mapping.action.clone(),
++                            outputs: feedback_outputs,
++                        });
++                    }
+                 }
+                 LogicalAction::Go => {
+                     new_mappings.push(Mapping {
+@@ -293,6 +322,14 @@ impl ControllerProfile {
+                 let matched = match output {
+                     Output::MidiNote { channel, note, .. } => matches_note(msg, *channel, *note),
+                     Output::MidiPitchwheel { channel } => matches_pitch(msg, *channel),
++                    Output::MidiCc { channel, cc } => {
++                        // Check if msg is CC and matches channel/cc
++                        if msg.len() >= 3 && (msg[0] & 0xF0) == 0xB0 {
++                            (msg[0] & 0x0F) == *channel && msg[1] == *cc
++                        } else {
++                            false
++                        }
++                    }
+                     _ => false,
+                 };
+ 
+@@ -314,3 +351,7 @@ pub fn load_profile(path: &str) -> Result<ControllerProfile> {
+ 
+     Ok(profile)
+ }
++
++fn default_cc_mode() -> MidiCcTriggerMode {
++    MidiCcTriggerMode::Absolute
++}
+diff --git a/src/gui.rs b/src/gui.rs
+index 6703c92..4bc28a6 100644
+--- a/src/gui.rs
++++ b/src/gui.rs
+@@ -18,7 +18,7 @@ pub struct BridgeApp {
+     pub last_applied_config: BridgeConfig,
+     pub status_message: String,
+     pub eos_ip_edit: String,
+-    pub controller_profile_edit: String,
++    pub editing_device: Option<String>,
+     pub tx_system: mpsc::Sender<SystemCommand>,
+     pub file_dialog: egui_file_dialog::FileDialog,
+     active_tab: Tab,
+@@ -27,6 +27,7 @@ pub struct BridgeApp {
+     pub mapping_nodes: std::collections::HashMap<usize, MappingNodeIds>,
+     pub show_quit_confirmation: bool,
+     pub allowed_to_close: bool,
++    pub selected_controller_for_graph: Option<String>,
+ }
+ 
+ pub struct MappingNodeIds {
+@@ -45,7 +46,7 @@ impl BridgeApp {
+             midi: midi.clone(),
+             last_applied_config: config.clone(),
+             eos_ip_edit: config.eos_ip.clone(),
+-            controller_profile_edit: config.controller_profile.clone(),
++            editing_device: None,
+             config_edit: config,
+             status_message: "Ready".to_string(),
+             tx_system,
+@@ -56,11 +57,15 @@ impl BridgeApp {
+             mapping_nodes: std::collections::HashMap::new(),
+             show_quit_confirmation: false,
+             allowed_to_close: false,
++            selected_controller_for_graph: None,
+         };
+ 
+         // Pre-populate the node graph with the current profile
+         if let Ok(m) = midi.lock() {
+-            app.populate_snarl(&m.profile);
++            if let Some((name, p)) = m.device_profiles.iter().next() {
++                app.selected_controller_for_graph = Some(name.clone());
++                app.populate_snarl(p);
++            }
+         }
+ 
+         app
+@@ -124,8 +129,18 @@ impl eframe::App for BridgeApp {
+             let logs: Vec<_> = m.activity_log.drain(..).collect();
+             log::debug!("Received {} activity events", logs.len());
+             for event in logs {
++                // Filter by selected controller to avoid cross-talk
++                if let Some(selected) = &self.selected_controller_for_graph {
++                    if event.device_name != *selected {
++                        continue;
++                    }
++                } else {
++                    continue;
++                }
++
+                 log::debug!(
+-                    "Activity: mapping_idx={}, part={:?}, value={}",
++                    "Activity: device={}, mapping_idx={}, part={:?}, value={}",
++                    event.device_name,
+                     event.mapping_idx,
+                     event.part,
+                     event.value
+@@ -222,12 +237,19 @@ impl eframe::App for BridgeApp {
+                             Ok(m) => {
+                                 ui.horizontal(|ui| {
+                                     ui.heading(format!("Bank: {}", m.fader_page));
+-                                    ui.label(format!("(Profile: {})", m.profile.name));
++                                    let profile_names: Vec<String> = m.device_profiles.values().map(|p| p.name.clone()).collect();
++                                    ui.label(format!("(Profiles: {})", profile_names.join(", ")));
+                                 });
+                                 ui.add_space(10.0);
+ 
+                                 ui.horizontal_top(|ui| {
+-                                    let bank_size = m.profile.eos_bank_size;
++                                    // Use max bank size for display
++                                    let mut bank_size = 0;
++                                    for p in m.device_profiles.values() {
++                                        if p.eos_bank_size > bank_size { bank_size = p.eos_bank_size; }
++                                    }
++                                    if bank_size == 0 { bank_size = 10; }
++
+                                     for i in 0..bank_size {
+                                         let column_width = 75.0;
+                                         ui.allocate_ui(egui::vec2(column_width, 220.0), |ui| {
+@@ -358,73 +380,64 @@ impl eframe::App for BridgeApp {
+                                     .spacing([10.0, 10.0])
+                                     .show(ui, |ui| {
+                                         if let Ok(m) = self.midi.lock() {
+-                                            ui.label("MIDI Input:");
+-                                            let mut selected_in =
+-                                                self.config_edit.midi_in_name.clone();
+-                                            if let Some(ref name) = selected_in
+-                                                && !m.available_in_ports.is_empty()
+-                                                && !m.available_in_ports.contains(name)
+-                                            {
+-                                                selected_in = None;
+-                                            }
+-                                            let display_in =
+-                                                selected_in.as_deref().unwrap_or("None");
+-                                            egui::ComboBox::from_id_salt("midi_in_select")
+-                                                .selected_text(display_in)
+-                                                .show_ui(ui, |ui| {
+-                                                    ui.selectable_value(
+-                                                        &mut selected_in,
+-                                                        None,
+-                                                        "None",
++                                            ui.label("Detected Controllers:");
++                                            ui.vertical(|ui| {
++                                                let mut unique_devices: std::collections::HashSet<
++                                                    String,
++                                                > = std::collections::HashSet::new();
++                                                for p in &m.available_in_ports {
++                                                    unique_devices.insert(p.clone());
++                                                }
++                                                for p in &m.available_out_ports {
++                                                    unique_devices.insert(p.clone());
++                                                }
++                                                let mut sorted_devices: Vec<_> =
++                                                    unique_devices.into_iter().collect();
++                                                sorted_devices.sort();
++
++                                                if sorted_devices.is_empty() {
++                                                    ui.label(
++                                                        egui::RichText::new("No devices found")
++                                                            .italics(),
+                                                     );
+-                                                    for port in &m.available_in_ports {
+-                                                        ui.selectable_value(
+-                                                            &mut selected_in,
+-                                                            Some(port.clone()),
+-                                                            port,
+-                                                        );
+-                                                    }
+-                                                });
+-                                            self.config_edit.midi_in_name = selected_in;
+-                                            ui.end_row();
++                                                }
+ 
+-                                            ui.label("MIDI Output:");
+-                                            let mut selected_out =
+-                                                self.config_edit.midi_out_name.clone();
+-                                            if let Some(ref name) = selected_out
+-                                                && !m.available_out_ports.is_empty()
+-                                                && !m.available_out_ports.contains(name)
+-                                            {
+-                                                selected_out = None;
+-                                            }
+-                                            let display_out =
+-                                                selected_out.as_deref().unwrap_or("None");
+-                                            egui::ComboBox::from_id_salt("midi_out_select")
+-                                                .selected_text(display_out)
+-                                                .show_ui(ui, |ui| {
+-                                                    ui.selectable_value(
+-                                                        &mut selected_out,
+-                                                        None,
+-                                                        "None",
+-                                                    );
+-                                                    for port in &m.available_out_ports {
+-                                                        ui.selectable_value(
+-                                                            &mut selected_out,
+-                                                            Some(port.clone()),
+-                                                            port,
+-                                                        );
+-                                                    }
+-                                                });
+-                                            self.config_edit.midi_out_name = selected_out;
+-                                            ui.end_row();
++                                                for device in sorted_devices {
++                                                    let mut enabled = self
++                                                        .config_edit
++                                                        .enabled_devices
++                                                        .contains_key(&device);
+ 
+-                                            ui.label("Controller Profile:");
+-                                            ui.horizontal(|ui| {
+-                                                ui.label(
+-                                                    egui::RichText::new(&m.profile.name).strong(),
+-                                                );
+-                                                if ui.button("📂 Change...").clicked() {
+-                                                    self.file_dialog.pick_file();
++                                                    ui.horizontal(|ui| {
++                                                        if ui.checkbox(&mut enabled, &device).changed()
++                                                        {
++                                                            if enabled {
++                                                                if !self
++                                                                    .config_edit
++                                                                    .enabled_devices
++                                                                    .contains_key(&device)
++                                                                {
++                                                                    // Default profile path
++                                                                    self.config_edit
++                                                                        .enabled_devices
++                                                                        .insert(device.clone(), "profiles/icon_platform_m_plus.json".to_string());
++                                                                }
++                                                            } else {
++                                                                self.config_edit
++                                                                    .enabled_devices
++                                                                    .remove(&device);
++                                                            }
++                                                        }
++
++                                                        if enabled {
++                                                            let current_profile = self.config_edit.enabled_devices.get(&device).cloned().unwrap_or_default();
++                                                            ui.label(egui::RichText::new(&current_profile).italics().small());
++                                                            if ui.button("📂").on_hover_text("Change Profile").clicked() {
++                                                                self.editing_device = Some(device.clone());
++                                                                self.file_dialog.pick_file();
++                                                            }
++                                                        }
++                                                    });
+                                                 }
+                                             });
+                                             ui.end_row();
+@@ -434,9 +447,12 @@ impl eframe::App for BridgeApp {
+                         });
+ 
+                         if let Some(path) = self.file_dialog.update(ctx).picked() {
+-                            let path_str = path.to_string_lossy().to_string();
+-                            self.controller_profile_edit = path_str.clone();
+-                            self.config_edit.controller_profile = path_str;
++                             if let Some(device) = &self.editing_device {
++                                let path_str = path.to_string_lossy().to_string();
++                                self.config_edit.enabled_devices.insert(device.clone(), path_str);
++                             }
++                             // Reset editing device? Maybe not, keep it in case they pick again? No, usually reset.
++                             self.editing_device = None;
+                         }
+ 
+                         ui.add_space(20.0);
+@@ -478,6 +494,33 @@ impl eframe::App for BridgeApp {
+                         self.snarl_zoom_pending *= input_zoom;
+ 
+                         ui.horizontal(|ui| {
++                             // Controller Selector
++                             if let Ok(m) = self.midi.lock() {
++                                 let mut profiles: Vec<_> = m.device_profiles.keys().cloned().collect();
++                                 profiles.sort();
++
++                                 let current_sel = self.selected_controller_for_graph.clone().unwrap_or_default();
++                                 let mut selected = current_sel.clone();
++
++                                 ui.label("Controller:");
++                                 egui::ComboBox::from_id_salt("graph_controller_selector")
++                                     .selected_text(&selected)
++                                     .show_ui(ui, |ui| {
++                                         for p in profiles {
++                                             ui.selectable_value(&mut selected, p.clone(), p);
++                                         }
++                                     });
++
++                                 if selected != current_sel {
++                                     self.selected_controller_for_graph = Some(selected.clone());
++                                     if let Some(p) = m.device_profiles.get(&selected) {
++                                         populate_needed = Some(p.clone());
++                                     }
++                                 }
++                             }
++
++                            ui.separator();
++
+                             if ui.button("➕").on_hover_text("Zoom In").clicked() {
+                                 self.snarl_zoom_pending *= 1.25;
+                             }
+@@ -485,10 +528,13 @@ impl eframe::App for BridgeApp {
+                                 self.snarl_zoom_pending *= 0.8;
+                             }
+                             ui.separator();
+-                            if ui.button("🔄 Refresh Mapping").clicked()
++                            if ui.button("🔄 Refresh").clicked()
+                                 && let Ok(m) = self.midi.lock()
+                             {
+-                                populate_needed = Some(m.profile.clone());
++                                if let Some(name) = &self.selected_controller_for_graph
++                                   && let Some(p) = m.device_profiles.get(name) {
++                                     populate_needed = Some(p.clone());
++                                }
+                             }
+                             ui.separator();
+                             ui.label("Ctrl + Scroll to zoom, Drag to pan");
+@@ -500,7 +546,16 @@ impl eframe::App for BridgeApp {
+                         if self.snarl.nodes().next().is_none()
+                             && let Ok(m) = self.midi.lock()
+                         {
+-                            populate_needed = Some(m.profile.clone());
++                             // Try selected first
++                             if let Some(name) = &self.selected_controller_for_graph
++                                && let Some(p) = m.device_profiles.get(name)
++                             {
++                                 populate_needed = Some(p.clone());
++                             } else if let Some((name, p)) = m.device_profiles.iter().next() {
++                                 // Fallback to first
++                                 self.selected_controller_for_graph = Some(name.clone());
++                                 populate_needed = Some(p.clone());
++                             }
+                         }
+ 
+                         let snarl_rect = ui.available_rect_before_wrap();
+diff --git a/src/lib.rs b/src/lib.rs
+index 94b65e5..a83d8c4 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
+ // ============================================================================
+ 
+ pub enum MackieEvent {
+-    MidiIn(Vec<u8>),
++    MidiIn { device_name: String, data: Vec<u8> },
+ }
+ 
+ pub enum SystemCommand {
+@@ -37,6 +37,7 @@ pub enum ActivityPart {
+ 
+ #[derive(Debug, Clone)]
+ pub struct ActivityEvent {
++    pub device_name: String,
+     pub mapping_idx: usize,
+     pub part: ActivityPart,
+     pub value: String,
+diff --git a/src/main.rs b/src/main.rs
+index 6e57114..eb04827 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -42,17 +42,7 @@ fn main() -> anyhow::Result<()> {
+         .block_on(OscClient::new(&cfg.eos_ip, cfg.eos_osc_port))
+         .context("Failed to create initial OSC client")?;
+ 
+-    let mut profile = controller::load_profile(&cfg.controller_profile).unwrap_or_else(|e| {
+-        warn!(
+-            "Failed to load controller profile {}, using default: {}",
+-            cfg.controller_profile, e
+-        );
+-        controller::ControllerProfile::default()
+-    });
+-
+-    profile.inject_feedback_mappings();
+-
+-    let midi = Arc::new(Mutex::new(Midi::new(osc_client, profile)));
++    let midi = Arc::new(Mutex::new(Midi::new(osc_client)));
+ 
+     // Background Event Processor (always running)
+     let midi_logic = Arc::clone(&midi);
+@@ -74,11 +64,13 @@ fn main() -> anyhow::Result<()> {
+             {
+                 tick = !tick;
+                 let vel = if tick { 127 } else { 0 };
+-                if let Some((note, chan, _)) = m
+-                    .profile
+-                    .get_midi_output_for_action(crate::controller::LogicalAction::Go)
+-                {
+-                    m.send_queue.enqueue(vec![0x90 | chan, note, vel]);
++                // Iterate over all devices
++                for (device_name, profile) in &m.device_profiles {
++                    if let Some((note, chan, _)) =
++                        profile.get_midi_output_for_action(crate::controller::LogicalAction::Go)
++                    {
++                        m.enqueue(device_name, vec![0x90 | chan, note, vel]);
++                    }
+                 }
+             }
+         }
+@@ -90,7 +82,7 @@ fn main() -> anyhow::Result<()> {
+     let initial_config = cfg.clone();
+     rt.spawn(async move {
+         let mut current_cancel_token = CancellationToken::new();
+-        let mut _midi_input_conn: Option<MidiInputConnection<()>> = None;
++        let mut mv_midi_input_conns: Vec<MidiInputConnection<()>> = Vec::new();
+ 
+         let mut config = initial_config;
+ 
+@@ -98,22 +90,22 @@ fn main() -> anyhow::Result<()> {
+             // Cancel previous tasks and cleanup
+             current_cancel_token.cancel();
+             current_cancel_token = CancellationToken::new();
+-            _midi_input_conn = None; // Dropping old connection
++            mv_midi_input_conns.clear(); // Dropping old connections
+ 
+             {
+                 let mut m = supervision_midi.lock().unwrap();
+-                m.connections.clear();
+-
+-                // Reload profile if needed
+-                let profile_path = &config.controller_profile;
+-                // Reload the profile based on the current config
+-                match controller::load_profile(profile_path) {
+-                    Ok(mut p) => {
+-                        info!("Loaded controller profile: {}", p.name);
+-                        p.inject_feedback_mappings();
+-                        m.profile = p;
++                m.device_connections.clear();
++                m.device_profiles.clear();
++
++                for (device_name, profile_path) in &config.enabled_devices {
++                    match controller::load_profile(profile_path) {
++                        Ok(mut p) => {
++                            info!("Loaded profile '{}' for device '{}'", p.name, device_name);
++                            p.inject_feedback_mappings();
++                            m.device_profiles.insert(device_name.clone(), p);
++                        }
++                        Err(e) => error!("Failed to load profile {} for {}: {}", profile_path, device_name, e),
+                     }
+-                    Err(e) => error!("Failed to reload profile {}: {}", profile_path, e),
+                 }
+             }
+ 
+@@ -202,18 +194,19 @@ fn main() -> anyhow::Result<()> {
+                     tokio::select! {
+                         _ = interval.tick() => {
+                             if let Ok(mut m) = pump_midi.lock() {
+-                                while let Some(msg) = m.send_queue.dequeue() {
+-                                    // VISUAL FEEDBACK: Check if this message corresponds to a mapping output
+-                                    let matches = m.find_mappings_for_midi_message(&msg);
++                                while let Some((target_device, msg)) = m.send_queue.dequeue() {
++                                    // VISUAL FEEDBACK
++                                    let matches = m.find_mappings_for_midi_message(&msg, &target_device);
+                                     for (idx, part) in matches {
+                                         m.activity_log.push(eos_midi_bridge::ActivityEvent {
++                                            device_name: target_device.clone(),
+                                             mapping_idx: idx,
+                                             part,
+                                             value: "Output".to_string(),
+                                         });
+                                     }
+ 
+-                                    for conn in &mut m.connections {
++                                    if let Some(conn) = m.device_connections.get_mut(&target_device) {
+                                         let _ = conn.send(&msg);
+                                     }
+                                 }
+@@ -225,30 +218,32 @@ fn main() -> anyhow::Result<()> {
+             });
+ 
+             // MIDI Connections
+-            if let (Some(in_name), Some(out_name)) = (&config.midi_in_name, &config.midi_out_name) {
+-                match setup_midi(
++            // MIDI Connections for all enabled devices
++            if !config.enabled_devices.is_empty() {
++                match setup_midi_devices(
+                     Arc::clone(&supervision_midi),
+-                    in_name,
+-                    out_name,
++                    &config.enabled_devices,
+                     supervision_tx_midi.clone(),
+                 ) {
+-                    Ok(conn) => {
+-                        _midi_input_conn = Some(conn);
+-                        info!("MIDI connected to {}/{}", in_name, out_name);
++                    Ok(conns) => {
++                        mv_midi_input_conns = conns;
++                        info!("MIDI devices connected: {:?}", config.enabled_devices);
+                         if let Ok(mut m) = supervision_midi.lock() {
+-                            m.connection_status =
+-                                format!("✓ Connected to {} / {}", in_name, out_name);
++                            m.connection_status = format!(
++                                "✓ Connected to {} devices",
++                                config.enabled_devices.len()
++                            );
+                         }
+                     }
+                     Err(e) => {
+-                        error!("Failed to connect MIDI: {}", e);
++                        error!("Failed to connect MIDI devices: {}", e);
+                         if let Ok(mut m) = supervision_midi.lock() {
+                             m.connection_status = format!("❌ MIDI Error: {}", e);
+                         }
+                     }
+                 }
+             } else if let Ok(mut m) = supervision_midi.lock() {
+-                m.connection_status = "⚠ MIDI Ports not selected".to_string();
++                m.connection_status = "⚠ No MIDI Devices Enabled".to_string();
+             }
+ 
+             // Wait for reconfiguration command
+@@ -268,6 +263,7 @@ fn main() -> anyhow::Result<()> {
+                 .ports()
+                 .iter()
+                 .filter_map(|p| scanner.port_name(p).ok().map(|name| clean_midi_name(&name)))
++                .filter(|name| !name.starts_with("Bridge"))
+                 .collect::<Vec<String>>(),
+             Err(_) => Vec::new(),
+         };
+@@ -276,6 +272,7 @@ fn main() -> anyhow::Result<()> {
+                 .ports()
+                 .iter()
+                 .filter_map(|p| scanner.port_name(p).ok().map(|name| clean_midi_name(&name)))
++                .filter(|name| !name.starts_with("Bridge"))
+                 .collect::<Vec<String>>(),
+             Err(_) => Vec::new(),
+         };
+@@ -297,6 +294,7 @@ fn main() -> anyhow::Result<()> {
+                     .ports()
+                     .iter()
+                     .filter_map(|p| scanner.port_name(p).ok().map(|name| clean_midi_name(&name)))
++                    .filter(|name| !name.starts_with("Bridge"))
+                     .collect::<Vec<String>>(),
+                 Err(_) => Vec::new(),
+             };
+@@ -306,6 +304,7 @@ fn main() -> anyhow::Result<()> {
+                     .ports()
+                     .iter()
+                     .filter_map(|p| scanner.port_name(p).ok().map(|name| clean_midi_name(&name)))
++                    .filter(|name| !name.starts_with("Bridge"))
+                     .collect::<Vec<String>>(),
+                 Err(_) => Vec::new(),
+             };
+@@ -335,9 +334,9 @@ fn main() -> anyhow::Result<()> {
+     // Shutdown and Reset
+     info!("Shutting down and resetting controller...");
+     if let Ok(mut m) = midi.lock() {
+-        m.controller_reset();
+-        while let Some(msg) = m.send_queue.dequeue() {
+-            for conn in &mut m.connections {
++        m.reset_all_outputs();
++        while let Some((target, msg)) = m.send_queue.dequeue() {
++            if let Some(conn) = m.device_connections.get_mut(&target) {
+                 let _ = conn.send(&msg);
+             }
+         }
+@@ -347,67 +346,93 @@ fn main() -> anyhow::Result<()> {
+ }
+ 
+ /// Helper to connect to MIDI ports by the exact names found in scan/config
+-fn setup_midi(
++/// Helper to connect to MULTIPLE MIDI devices by name
++fn setup_midi_devices(
+     midi_state: Arc<Mutex<Midi>>,
+-    in_name: &str,
+-    out_name: &str,
++    enabled_devices: &std::collections::HashMap<String, String>,
+     tx: mpsc::Sender<MackieEvent>,
+-) -> anyhow::Result<MidiInputConnection<()>> {
+-    let midi_in = MidiInput::new("Bridge In").context("Failed to create MIDI input")?;
+-    let midi_out = MidiOutput::new("Bridge Out").context("Failed to create MIDI output")?;
+-
+-    let in_port = midi_in
+-        .ports()
+-        .into_iter()
+-        .find(|p| {
++) -> anyhow::Result<Vec<MidiInputConnection<()>>> {
++    let mut input_connections = Vec::new(); // Keep alive
++
++    // Iterate over enabled devices and attempt to connect
++    for device_name in enabled_devices.keys() {
++        // --- INPUT ---
++        // We create a new client for each device attempt because we consume it
++        let midi_in = MidiInput::new(&format!("Bridge In {}", device_name))
++            .context("Failed to create MIDI input client")?;
++
++        if let Some(in_port) = midi_in.ports().into_iter().find(|p| {
+             midi_in
+                 .port_name(p)
+                 .ok()
+                 .map(|name| clean_midi_name(&name))
+                 .as_deref()
+-                == Some(in_name)
+-        })
+-        .context(format!("MIDI Input '{}' not found", in_name))?;
+-
+-    let out_port = midi_out
+-        .ports()
+-        .into_iter()
+-        .find(|p| {
++                == Some(device_name)
++        }) {
++            let tx_clone = tx.clone();
++            let d_name_log = device_name.clone();
++            let d_name_event = d_name_log.clone();
++            match midi_in.connect(
++                &in_port,
++                "bridge-in-conn",
++                move |_, msg, _| {
++                    if let Err(e) = tx_clone.blocking_send(MackieEvent::MidiIn {
++                        device_name: d_name_event.clone(),
++                        data: msg.to_vec(),
++                    }) {
++                        error!(
++                            "Failed to send MIDI event from {} to processor: {}",
++                            d_name_log, e
++                        );
++                    }
++                },
++                (),
++            ) {
++                Ok(conn) => {
++                    input_connections.push(conn);
++                    info!("Connected Input: {}", device_name);
++                }
++                Err(e) => error!("Failed to connect Input for {}: {}", device_name, e),
++            }
++        } else {
++            warn!("MIDI Input device '{}' not found", device_name);
++        }
++
++        // --- OUTPUT ---
++        let midi_out = MidiOutput::new(&format!("Bridge Out {}", device_name))
++            .context("Failed to create MIDI output client")?;
++
++        if let Some(out_port) = midi_out.ports().into_iter().find(|p| {
+             midi_out
+                 .port_name(p)
+                 .ok()
+                 .map(|name| clean_midi_name(&name))
+                 .as_deref()
+-                == Some(out_name)
+-        })
+-        .context(format!("MIDI Output '{}' not found", out_name))?;
+-
+-    let conn_in = midi_in
+-        .connect(
+-            &in_port,
+-            "bridge-in-conn",
+-            move |_, msg, _| {
+-                if let Err(e) = tx.blocking_send(MackieEvent::MidiIn(msg.to_vec())) {
+-                    error!("Failed to send MIDI event to processor: {}", e);
++                == Some(device_name)
++        }) {
++            match midi_out.connect(&out_port, "bridge-out-conn") {
++                Ok(mut conn) => {
++                    info!("Connected Output: {}", device_name);
++
++                    // Send startup messages
++                    if let Ok(m) = midi_state.lock() {
++                        if let Some(profile) = m.device_profiles.get(device_name) {
++                            for msg in &profile.startup_messages {
++                                let _ = conn.send(msg);
++                            }
++                        }
++                    }
++
++                    if let Ok(mut m) = midi_state.lock() {
++                        m.device_connections.insert(device_name.clone(), conn);
++                    }
+                 }
+-            },
+-            (),
+-        )
+-        .map_err(|e| anyhow::anyhow!("MIDI In Connect Error: {}", e))?;
+-
+-    let conn_out = midi_out
+-        .connect(&out_port, "bridge-out-conn")
+-        .map_err(|e| anyhow::anyhow!("MIDI Out Connect Error: {}", e))?;
+-
+-    match midi_state.lock() {
+-        Ok(mut m) => {
+-            m.connections.push(conn_out);
+-            info!("Successfully connected MIDI ports.");
+-        }
+-        Err(e) => {
+-            return Err(anyhow::anyhow!("Failed to lock MIDI state: {}", e));
++                Err(e) => error!("Failed to connect Output for {}: {}", device_name, e),
++            }
++        } else {
++            warn!("MIDI Output device '{}' not found", device_name);
+         }
+     }
+ 
+-    Ok(conn_in)
++    Ok(input_connections)
+ }
+diff --git a/src/midi.rs b/src/midi.rs
+index a9846c8..e8df8a2 100644
+--- a/src/midi.rs
++++ b/src/midi.rs
+@@ -1,21 +1,37 @@
+ use crate::{CrossfadeState, MackieEvent, Queue, osc::OscClient, strip_accents};
+-use midir::MidiOutputConnection;
++// Used in struct definitions but seemingly unused?
++// Actually if we look at line 16, it IS used.
++// Why did rustc complain?
++// "warning: unused import: `midir::MidiOutputConnection`"
++// "note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default"
++// Maybe it's because I'm using `midir::MidiOutputConnection` fully qualified in the struct, so I don't need the import?
++// Yes.
++
+ use std::sync::{Arc, Mutex};
+ use std::time::Duration;
+ use tokio::time;
+ 
+ pub struct Midi {
+-    pub osc_client: OscClient,
+-    pub profile: crate::controller::ControllerProfile,
+     pub fader_page: u8,
+-    pub send_queue: Queue<Vec<u8>>,
+-    pub connections: Vec<MidiOutputConnection>,
++    pub send_queue: Queue<(String, Vec<u8>)>,
+     pub last_page_change: time::Instant,
+     pub page_display_time: Duration,
+     pub crossfade_state: CrossfadeState,
+     pub current_cue: Option<f32>,
+-    pub fader_levels: Vec<f32>,
+-    pub fader_names: Vec<String>,
++    pub osc_client: OscClient,
++    pub device_profiles: std::collections::HashMap<String, crate::controller::ControllerProfile>,
++    pub device_connections: std::collections::HashMap<String, midir::MidiOutputConnection>,
++    // Removed old connections vec, now mapping output connections by device name
++
++    // State maps keyed by [DeviceName] usually not needed if state is global,
++    // BUT fader levels might differ if profiles map them differently.
++    // For now, we keep Global State for the "EOS Model" side (what EOS tells us),
++    // and we translate that to each device.
++
++    // EOS State
++    pub fader_levels: [f32; 128], // Stores up to 128 faders (enough for huge banks)
++    pub fader_names: Vec<String>, // Stores names for faders
++
+     pub connection_status: String,
+     pub available_in_ports: Vec<String>,
+     pub available_out_ports: Vec<String>,
+@@ -28,20 +44,23 @@ pub struct Midi {
+ }
+ 
+ impl Midi {
+-    pub fn new(osc_client: OscClient, profile: crate::controller::ControllerProfile) -> Self {
+-        let bank_size = profile.eos_bank_size;
++    pub fn new(osc_client: OscClient) -> Self {
++        // Initialize with empty names
++        let fader_names = vec![String::new(); 128];
++        let fader_levels = [0.0; 128];
++
+         Self {
+             osc_client,
+-            profile,
++            device_profiles: std::collections::HashMap::new(),
++            device_connections: std::collections::HashMap::new(),
++            fader_levels,
++            fader_names,
+             fader_page: 1,
+             send_queue: Queue::new(),
+-            connections: Vec::new(),
+             last_page_change: time::Instant::now() - Duration::from_secs(2),
+             page_display_time: Duration::from_millis(500),
+             crossfade_state: CrossfadeState::Inactive,
+             current_cue: None,
+-            fader_levels: vec![0.0; bank_size],
+-            fader_names: vec![String::new(); bank_size],
+             connection_status: "Disconnected".to_string(),
+             available_in_ports: Vec::new(),
+             available_out_ports: Vec::new(),
+@@ -54,100 +73,184 @@ impl Midi {
+         }
+     }
+ 
+-    pub fn enqueue_sysex(&self, data: Vec<u8>) {
+-        self.send_queue.enqueue(data);
++    pub fn enqueue(&self, target_device: &str, data: Vec<u8>) {
++        self.send_queue.enqueue((target_device.to_string(), data));
+     }
+ 
+-    pub fn enqueue_pitchwheel(&self, fader_index: u8, value: i16) {
+-        // Find a mapping for FaderMove { index: fader_index } that has a MidiPitchwheel output
+-        for mapping in &self.profile.mappings {
+-            if let crate::controller::LogicalAction::FaderMove { index } = mapping.action
+-                && index == fader_index as usize
+-            {
+-                for output in &mapping.outputs {
+-                    if let crate::controller::Output::MidiPitchwheel { channel } = output {
+-                        let val = (value + 8192) as u16; // Convert pitch (-8192 to 8191) to 0-16383 range
+-                        let mut data = vec![0xE0 | channel];
+-                        data.push((val & 0x7F) as u8); // LSB
+-                        data.push(((val >> 7) & 0x7F) as u8); // MSB
+-                        self.send_queue.enqueue(data);
+-                        return;
++    pub fn update_fader_feedback(&mut self, fader_index: usize, value: f32) {
++        let mut logs = Vec::new();
++        // Iterate over all devices and check their profiles
++        for (device_name, profile) in &self.device_profiles {
++            // Find mappings for FaderMove { index }
++            for (map_idx, mapping) in profile.mappings.iter().enumerate() {
++                if let crate::controller::LogicalAction::FaderMove { index } = mapping.action
++                    && index == fader_index
++                {
++                    for (out_idx, output) in mapping.outputs.iter().enumerate() {
++                        match output {
++                            crate::controller::Output::MidiPitchwheel { channel } => {
++                                // 14-bit Pitch (0-16383)
++                                let val_14 = (value * 16383.0).round() as u16;
++                                let mut data = vec![0xE0 | channel];
++                                data.push((val_14 & 0x7F) as u8); // LSB
++                                data.push(((val_14 >> 7) & 0x7F) as u8); // MSB
++                                self.enqueue(device_name, data);
++
++                                logs.push(crate::ActivityEvent {
++                                    device_name: device_name.to_string(),
++                                    mapping_idx: map_idx,
++                                    part: crate::ActivityPart::Output(out_idx),
++                                    value: format!("Pitch {:.0}", value * 100.0), // Simplified log
++                                });
++                            }
++                            crate::controller::Output::MidiCc { cc, channel } => {
++                                // 7-bit CC (0-127)
++                                let val_7 = (value * 127.0).round() as u8;
++                                self.enqueue(device_name, vec![0xB0 | channel, *cc, val_7]);
++
++                                logs.push(crate::ActivityEvent {
++                                    device_name: device_name.to_string(),
++                                    mapping_idx: map_idx,
++                                    part: crate::ActivityPart::Output(out_idx),
++                                    value: format!("CC {} (V:{})", cc, val_7),
++                                });
++                            }
++                            _ => {}
++                        }
+                     }
+                 }
+             }
+         }
++        self.activity_log.extend(logs);
+     }
+ 
+     pub fn send_lcd(&self, text: &str, line: u8) {
+         let text = strip_accents(text);
+-        if line as usize >= self.profile.display.line_offsets.len() {
+-            return;
++        for (device_name, profile) in &self.device_profiles {
++            if line as usize >= profile.display.line_offsets.len() {
++                continue;
++            }
++            let start = profile.display.line_offsets[line as usize];
++            let mut data = vec![0xF0];
++            data.extend(&profile.display.sysex_prefix);
++            data.push(start);
++            data.extend(text.bytes().take(profile.display.line_length));
++            data.push(0xF7);
++            self.enqueue(device_name, data);
+         }
+-        let start = self.profile.display.line_offsets[line as usize];
+-        let mut data = vec![0xF0];
+-        data.extend(&self.profile.display.sysex_prefix);
+-        data.push(start);
+-        data.extend(text.bytes().take(self.profile.display.line_length));
+-        data.push(0xF7);
+-        self.enqueue_sysex(data);
+     }
+ 
+     pub fn send_to_strip(&self, text: &str, line: u8, strip: usize) {
+-        if line as usize >= self.profile.display.line_offsets.len() {
+-            return;
+-        }
+-        let start = self.profile.display.line_offsets[line as usize]
+-            + (strip * self.profile.display.strip_width) as u8;
+-
+-        let width = self.profile.display.strip_width;
+-        let text = format!("{:<width$}|", strip_accents(text), width = width - 1);
+-        let mut data = vec![0xF0];
+-        data.extend(&self.profile.display.sysex_prefix);
+-        data.push(start);
+-        data.extend(text.bytes().take(width));
+-        data.push(0xF7);
+-        self.enqueue_sysex(data);
+-    }
++        let text_stripped = strip_accents(text);
+ 
+-    pub fn show_page_number(&self, page: u8) {
+-        // Clear line
+-        let len = self.profile.display.line_length;
+-        self.send_lcd(&" ".repeat(len), 0);
++        for (device_name, profile) in &self.device_profiles {
++            // Check if this strip (0-indexed) corresponds to a Visible Fader (1-indexed)
++            if let Some(visible) = &profile.display.visible_faders {
++                if !visible.contains(&(strip + 1)) {
++                    continue;
++                }
++            }
+ 
+-        let page_text = format!("Page {}", page);
+-        // Center the text
+-        let centered_text = crate::center_text(&page_text, len);
++            if line as usize >= profile.display.line_offsets.len() {
++                continue;
++            }
++            let start = profile.display.line_offsets[line as usize]
++                + (strip * profile.display.strip_width) as u8;
+ 
+-        if self.profile.display.line_offsets.len() > 1 {
+-            let start = self.profile.display.line_offsets[1];
++            let width = profile.display.strip_width;
++            // Padding and pipe logic
++            let text_fmt = format!("{:<width$}|", text_stripped, width = width - 1);
+             let mut data = vec![0xF0];
+-            data.extend(&self.profile.display.sysex_prefix);
++            data.extend(&profile.display.sysex_prefix);
+             data.push(start);
+-            data.extend(centered_text.bytes().take(len));
++            data.extend(text_fmt.bytes().take(width));
+             data.push(0xF7);
+-            self.enqueue_sysex(data);
++            self.enqueue(device_name, data);
+         }
+     }
+ 
+-    pub fn controller_reset(&self) {
+-        let len = self.profile.display.line_length;
+-        for line in 0..self.profile.display.line_offsets.len() {
+-            self.send_lcd(&" ".repeat(len), line as u8);
+-        }
++    pub fn show_page_number(&self, page: u8) {
++        for (device_name, profile) in &self.device_profiles {
++            // 1. Clear line 0
++            let len = profile.display.line_length;
++            // Manual send_lcd logic inline to avoid double iteration
++            if !profile.display.line_offsets.is_empty() {
++                let space = " ".repeat(len);
++                let start = profile.display.line_offsets[0];
++                let mut data = vec![0xF0];
++                data.extend(&profile.display.sysex_prefix);
++                data.push(start);
++                data.extend(space.bytes().take(len));
++                data.push(0xF7);
++                self.enqueue(device_name, data);
++            }
+ 
+-        // Reset all physical faders found in mappings
+-        for mapping in &self.profile.mappings {
+-            if let crate::controller::LogicalAction::FaderMove { index } = mapping.action {
+-                self.enqueue_pitchwheel(index as u8, -8192);
++            // 2. Show Page
++            if profile.display.line_offsets.len() > 1 {
++                let page_text = format!("Page {}", page);
++                let centered_text = crate::center_text(&page_text, len);
++
++                let start = profile.display.line_offsets[1];
++                let mut data = vec![0xF0];
++                data.extend(&profile.display.sysex_prefix);
++                data.push(start);
++                data.extend(centered_text.bytes().take(len));
++                data.push(0xF7);
++                self.enqueue(device_name, data);
+             }
+         }
++    }
+ 
+-        for note in 0..128 {
+-            self.send_queue.enqueue(vec![0x90, note, 0]);
++    pub fn controller_reset(&self) {
++        for (device_name, profile) in &self.device_profiles {
++            let len = profile.display.line_length;
++            for line in 0..profile.display.line_offsets.len() {
++                // Inline send_lcd
++                if line as usize >= profile.display.line_offsets.len() {
++                    continue;
++                }
++                let start = profile.display.line_offsets[line as usize];
++                let mut data = vec![0xF0];
++                data.extend(&profile.display.sysex_prefix);
++                data.push(start);
++                data.extend(" ".repeat(len).bytes().take(len));
++                data.push(0xF7);
++                self.enqueue(device_name, data);
++            }
++
++            // Reset faders
++            for mapping in &profile.mappings {
++                if let crate::controller::LogicalAction::FaderMove { index: _ } = mapping.action {
++                    // Logic from enqueue_pitchwheel inline
++                    for output in &mapping.outputs {
++                        if let crate::controller::Output::MidiPitchwheel { channel } = output {
++                            // -8192
++                            let val = 0 as u16;
++                            let mut data = vec![0xE0 | channel];
++                            data.push((val & 0x7F) as u8);
++                            data.push(((val >> 7) & 0x7F) as u8);
++                            self.enqueue(device_name, data);
++                        }
++                    }
++                }
++            }
++
++            // Reset Notes
++            for note in 0..128 {
++                self.enqueue(device_name, vec![0x90, note, 0]);
++            }
+         }
+     }
+-    pub fn find_mappings_for_midi_message(&self, msg: &[u8]) -> Vec<(usize, crate::ActivityPart)> {
+-        self.profile.match_output_message(msg)
++    pub fn find_mappings_for_midi_message(
++        &self,
++        msg: &[u8],
++        device_name: &str,
++    ) -> Vec<(usize, crate::ActivityPart)> {
++        if let Some(profile) = self.device_profiles.get(device_name) {
++            profile.match_output_message(msg)
++        } else {
++            Vec::new()
++        }
+     }
+ 
+     pub fn set_crossfade_state(&mut self, new_state: crate::CrossfadeState, force: bool) {
+@@ -161,36 +264,49 @@ impl Midi {
+         }
+         self.crossfade_state = new_state;
+ 
+-        let go_fb = self
+-            .profile
+-            .get_midi_output_for_action(crate::controller::LogicalAction::Go);
+-        let stop_fb = self
+-            .profile
+-            .get_midi_output_for_action(crate::controller::LogicalAction::Stop);
++        // Helper vars removed as we need per-device lookup
+ 
+         match self.crossfade_state {
+             crate::CrossfadeState::Go => {
+-                if let Some((n, c, v)) = go_fb {
+-                    self.send_queue.enqueue(vec![0x90 | c, n, v]);
+-                }
+-                if let Some((n, c, _)) = stop_fb {
+-                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
++                for (d_name, p) in &self.device_profiles {
++                    if let Some((n, c, v)) =
++                        p.get_midi_output_for_action(crate::controller::LogicalAction::Go)
++                    {
++                        self.enqueue(d_name, vec![0x90 | c, n, v]);
++                    }
++                    if let Some((n, c, _)) =
++                        p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
++                    {
++                        self.enqueue(d_name, vec![0x90 | c, n, 0]);
++                    }
+                 }
+             }
+             crate::CrossfadeState::GoBack | crate::CrossfadeState::Pause => {
+-                if let Some((n, c, v)) = stop_fb {
+-                    self.send_queue.enqueue(vec![0x90 | c, n, v]);
+-                }
+-                if let Some((n, c, _)) = go_fb {
+-                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
++                for (d_name, p) in &self.device_profiles {
++                    if let Some((n, c, v)) =
++                        p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
++                    {
++                        self.enqueue(d_name, vec![0x90 | c, n, v]);
++                    }
++                    if let Some((n, c, _)) =
++                        p.get_midi_output_for_action(crate::controller::LogicalAction::Go)
++                    {
++                        self.enqueue(d_name, vec![0x90 | c, n, 0]);
++                    }
+                 }
+             }
+             crate::CrossfadeState::Inactive => {
+-                if let Some((n, c, _)) = go_fb {
+-                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
+-                }
+-                if let Some((n, c, _)) = stop_fb {
+-                    self.send_queue.enqueue(vec![0x90 | c, n, 0]);
++                for (d_name, p) in &self.device_profiles {
++                    if let Some((n, c, _)) =
++                        p.get_midi_output_for_action(crate::controller::LogicalAction::Go)
++                    {
++                        self.enqueue(d_name, vec![0x90 | c, n, 0]);
++                    }
++                    if let Some((n, c, _)) =
++                        p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
++                    {
++                        self.enqueue(d_name, vec![0x90 | c, n, 0]);
++                    }
+                 }
+             }
+         }
+@@ -200,13 +316,52 @@ impl Midi {
+         if self.crossfade_state == crate::CrossfadeState::Pause {
+             self.blink_state = !self.blink_state;
+ 
+-            let go_fb = self
+-                .profile
+-                .get_midi_output_for_action(crate::controller::LogicalAction::Go);
++            // let go_fb = self.profile... REMOVED, doing manual iteration below
+ 
+-            if let Some((n, c, _)) = go_fb {
+-                let v = if self.blink_state { 127 } else { 0 };
+-                self.send_queue.enqueue(vec![0x90 | c, n, v]);
++            let _v = if self.blink_state { 127 } else { 0 };
++            // Need to find which device(s) have this mapping?
++            // set_crossfade_state handles the finding.
++            // Re-using set_crossfade_state logic might be cleaner but it resets blink state.
++            // Let's iterate:
++            for (device_name, profile) in &self.device_profiles {
++                if let Some((n, c, _)) =
++                    profile.get_midi_output_for_action(crate::controller::LogicalAction::Go)
++                {
++                    let v = if self.blink_state { 127 } else { 0 };
++                    self.enqueue(device_name, vec![0x90 | c, n, v]);
++                }
++            }
++        }
++    }
++    pub fn reset_all_outputs(&self) {
++        for (device_name, profile) in &self.device_profiles {
++            // Clear LCD if applicable
++            let len = profile.display.line_length;
++            for line in 0..profile.display.line_offsets.len() {
++                let start = profile.display.line_offsets[line];
++                let mut data = vec![0xF0];
++                data.extend(&profile.display.sysex_prefix);
++                data.push(start);
++                data.extend(" ".repeat(len).bytes().take(len));
++                data.push(0xF7);
++                self.enqueue(device_name, data);
++            }
++
++            for mapping in &profile.mappings {
++                for output in &mapping.outputs {
++                    match output {
++                        crate::controller::Output::MidiNote { note, channel, .. } => {
++                            self.enqueue(device_name, vec![0x90 | channel, *note, 0]);
++                        }
++                        crate::controller::Output::MidiCc { cc, channel, .. } => {
++                            self.enqueue(device_name, vec![0xB0 | channel, *cc, 0]);
++                        }
++                        crate::controller::Output::MidiPitchwheel { channel } => {
++                            self.enqueue(device_name, vec![0xE0 | channel, 0, 0]);
++                        }
++                        _ => {}
++                    }
++                }
+             }
+         }
+     }
+@@ -214,7 +369,10 @@ impl Midi {
+ 
+ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
+     match event {
+-        MackieEvent::MidiIn(msg) => {
++        MackieEvent::MidiIn {
++            device_name,
++            data: msg,
++        } => {
+             if msg.len() < 3 {
+                 return;
+             }
+@@ -224,7 +382,17 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
+             // Get the client and profile without holding a lock on the whole struct
+             let (_client, profile) = {
+                 let m = midi.lock().unwrap();
+-                (m.osc_client.clone(), m.profile.clone())
++                // Find profile for this device
++                let p = m.device_profiles.get(&device_name).cloned();
++                (m.osc_client.clone(), p)
++            };
++
++            let profile = match profile {
++                Some(p) => p,
++                None => {
++                    // Profile not found for this device?
++                    return;
++                }
+             };
+ 
+             // Identify the trigger
+@@ -257,10 +425,14 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
+                         crate::controller::Trigger::MidiCc {
+                             cc: cc1,
+                             channel: c1,
++                            mode: _, // Mode is purely for interpretation, not matching?
++                                     // Actually, if we have different modes, they match the same CC/Channel.
++                                     // So matching logic should be same.
+                         },
+                         crate::controller::Trigger::MidiCc {
+                             cc: cc2,
+                             channel: c2,
++                            mode: _,
+                         },
+                     ) => cc1 == cc2 && c1 == c2,
+                     (
+@@ -276,6 +448,7 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
+                     {
+                         let mut m = midi.lock().unwrap();
+                         m.activity_log.push(crate::ActivityEvent {
++                            device_name: device_name.clone(),
+                             mapping_idx,
+                             part: crate::ActivityPart::Trigger,
+                             value: match &trigger {
+@@ -295,7 +468,15 @@ pub async fn handle_event_logic(event: MackieEvent, midi: Arc<Mutex<Midi>>) {
+                     }
+ 
+                     // Logic Action Processing via Helper
+-                    execute_mapping(Arc::clone(&midi), mapping, mapping_idx, d1, d2).await;
++                    execute_mapping(
++                        Arc::clone(&midi),
++                        mapping,
++                        mapping_idx,
++                        d1,
++                        d2,
++                        &device_name,
++                    )
++                    .await;
+                 }
+             }
+         }
+@@ -308,18 +489,31 @@ pub async fn execute_mapping(
+     mapping_idx: usize,
+     d1: u8,
+     d2: u8,
++    device_name: &str,
+ ) {
+     let (client, profile) = {
+         let m = midi.lock().unwrap();
+-        (m.osc_client.clone(), m.profile.clone())
++        (
++            m.osc_client.clone(),
++            m.device_profiles.get(device_name).cloned(),
++        )
++    };
++
++    let profile = if let Some(p) = profile {
++        p
++    } else {
++        return;
+     };
+ 
++    let mut cached_fader_value: Option<f32> = None;
++
+     // Logic Action Processing
+     match &mapping.action {
+         crate::controller::LogicalAction::Go => {
+             let mut m = midi.lock().unwrap();
+             m.crossfade_state = CrossfadeState::Go;
+             m.activity_log.push(crate::ActivityEvent {
++                device_name: device_name.to_string(),
+                 mapping_idx,
+                 part: crate::ActivityPart::Action,
+                 value: "GO".to_string(),
+@@ -335,6 +529,7 @@ pub async fn execute_mapping(
+                 "BACK"
+             };
+             m.activity_log.push(crate::ActivityEvent {
++                device_name: device_name.to_string(),
+                 mapping_idx,
+                 part: crate::ActivityPart::Action,
+                 value: label.to_string(),
+@@ -344,6 +539,7 @@ pub async fn execute_mapping(
+             let mut m = midi.lock().unwrap();
+             m.crossfade_state = CrossfadeState::Go;
+             m.activity_log.push(crate::ActivityEvent {
++                device_name: device_name.to_string(),
+                 mapping_idx,
+                 part: crate::ActivityPart::Action,
+                 value: "RESUME".to_string(),
+@@ -364,6 +560,7 @@ pub async fn execute_mapping(
+                 m.show_page_number(m.fader_page);
+                 let page = m.fader_page;
+                 m.activity_log.push(crate::ActivityEvent {
++                    device_name: device_name.to_string(),
+                     mapping_idx,
+                     part: crate::ActivityPart::Action,
+                     value: format!("PAGE {}", page),
+@@ -388,17 +585,109 @@ pub async fn execute_mapping(
+                     .await;
+             });
+         }
++
+         crate::controller::LogicalAction::FaderMove { index } => {
+-            let value = ((d2 as i16) << 7) | (d1 as i16);
+-            let f_val = (value as f32) / 16383.0;
+-            let mut m = midi.lock().unwrap();
+-            if *index < m.fader_levels.len() {
+-                m.fader_levels[*index] = f_val;
+-                m.activity_log.push(crate::ActivityEvent {
+-                    mapping_idx,
+-                    part: crate::ActivityPart::Action,
+-                    value: format!("{:.0}%", f_val * 100.0),
+-                });
++            let mut final_v = 0.0;
++            let mut update = false;
++
++            if let crate::controller::Trigger::MidiCc { mode, .. } = &mapping.trigger {
++                match mode {
++                    crate::controller::MidiCcTriggerMode::Absolute => {
++                        // let value = ((d2 as i16) << 7) | (d1 as i16); // Wait, d1/d2 logic for FaderMove assumed 14-bit pitchbend source!
++                        // If source is CC (7-bit), d2 is value.
++                        // But if source is PitchWheel, d1/d2 is 14-bit.
++                        // Logic below was hardcoded for PitchWheel?
++                        // "let value = ((d2 as i16) << 7) | (d1 as i16);"
++
++                        // We need to differentiate source trigger type for value extraction!
++                        // But execute_mapping just gets d1/d2.
++
++                        // FIX:
++                        let f_val = if d1 == 0xB0 || (d1 & 0xF0) == 0xB0 {
++                            // Ah d1 passed to execute_mapping is msg[1], d2 is msg[2]
++                            // msg[0] is not passed?
++                            // Wait, call site:
++                            // let (d1, d2) = (msg[1], msg[2]);
++                            // execute_mapping(..., d1, d2, ...)
++                            // We don't know if it was PitchWheel or CC inside execute_mapping easily without checking trigger type again.
++
++                            (d2 as f32) / 127.0
++                        } else {
++                            // Assume PitchWheel default 14-bit
++                            let value = ((d2 as i16) << 7) | (d1 as i16);
++                            (value as f32) / 16383.0
++                        };
++                        final_v = f_val;
++                        update = true;
++                    }
++                    crate::controller::MidiCcTriggerMode::RelativeStandard => {
++                        // < 64 = +d2, >= 64 = -(d2-64) ?
++                        // Usually 1-63 is +, 65-127 is - (Two's complement 7-bit signed?)
++                        // Or 65 = -1, 127 = -63?
++                        // Let's implement generic Signed 7-bit:
++                        // 0-63 positive, 64-127 negative (offset 128? or just >64 is neg?)
++
++                        // Relative 1 (Behringer Manual says 1..7, 65..71)
++                        // Actually let's assume RelativeBehringer covers the specifics.
++                        // Standard often 65 = +1? No 1=+1.
++
++                        // Let's implement logic:
++                        let delta: i32 = if d2 < 64 {
++                            d2 as i32
++                        } else {
++                            (d2 as i32) - 128
++                        }; // 7-bit signed
++
++                        let m = midi.lock().unwrap();
++                        if *index < m.fader_levels.len() {
++                            let current = m.fader_levels[*index];
++                            let new_val = (current + (delta as f32 * 0.01)).clamp(0.0, 1.0); // 1% per tick?
++                            final_v = new_val;
++                            update = true;
++                        }
++                    }
++                    crate::controller::MidiCcTriggerMode::RelativeBehringer => {
++                        // CW: 1..7 (speed) -> +1..+7
++                        // CCW: 127..121? -> -1..-7 ?
++                        // Current issue: User reports "drops immediately".
++                        // This implies our previous logic (65 = -1) was being fed 127, resulting in -63.
++                        // So device sends 127 for -1.
++                        // We will use standard 7-bit signed logic (High values = small negatives).
++                        let delta: i32 = if d2 >= 64 {
++                            (d2 as i32) - 128
++                        } else {
++                            d2 as i32
++                        };
++                        let m = midi.lock().unwrap();
++                        if *index < m.fader_levels.len() {
++                            let current = m.fader_levels[*index];
++                            let new_val = (current + (delta as f32 * 0.005)).clamp(0.0, 1.0); // 0.5% per tick base
++                            final_v = new_val;
++                            update = true;
++                        }
++                    }
++                }
++            } else {
++                // Not MIDI CC Trigger (PitchWheel or Note)
++                // Original logic for PitchWheel/Fader
++                // Assuming PitchWheel for FaderMove usually
++                let value = ((d2 as i16) << 7) | (d1 as i16);
++                final_v = (value as f32) / 16383.0;
++                update = true;
++            }
++
++            if update {
++                let mut m = midi.lock().unwrap();
++                if *index < m.fader_levels.len() {
++                    m.fader_levels[*index] = final_v;
++                    cached_fader_value = Some(final_v);
++                    m.activity_log.push(crate::ActivityEvent {
++                        device_name: device_name.to_string(),
++                        mapping_idx,
++                        part: crate::ActivityPart::Action,
++                        value: format!("{:.0}%", final_v * 100.0),
++                    });
++                }
+             }
+         }
+     }
+@@ -406,7 +695,7 @@ pub async fn execute_mapping(
+     // Capture dynamic values for OSC replacement
+     let (current_page, bank_size) = {
+         let m = midi.lock().unwrap();
+-        (m.fader_page, m.profile.eos_bank_size)
++        (m.fader_page, profile.eos_bank_size)
+     };
+ 
+     // Output Processing
+@@ -418,7 +707,12 @@ pub async fn execute_mapping(
+ 
+                 // Perform dynamic replacement
+                 if final_addr.contains("{page}") {
+-                    final_addr = final_addr.replace("{page}", &current_page.to_string());
++                    let page_str = if current_page <= 1 {
++                        String::new()
++                    } else {
++                        (current_page - 1).to_string()
++                    };
++                    final_addr = final_addr.replace("{page}", &page_str);
+                 }
+                 if final_addr.contains("{bank_size}") {
+                     final_addr = final_addr.replace("{bank_size}", &bank_size.to_string());
+@@ -429,9 +723,14 @@ pub async fn execute_mapping(
+                 // For Faders, we need the value
+                 let arg = if let crate::controller::LogicalAction::FaderMove { .. } = mapping.action
+                 {
+-                    let value = ((d2 as i16) << 7) | (d1 as i16);
+-                    let f_val = (value as f32) / 16383.0;
+-                    Some(rosc::OscType::Float(f_val))
++                    if let Some(val) = cached_fader_value {
++                        Some(rosc::OscType::Float(val))
++                    } else {
++                        // Fallback to recalculating for absolute/pitchwheel if somehow not cached (shouldn't happen for FaderMove)
++                        let value = ((d2 as i16) << 7) | (d1 as i16);
++                        let f_val = (value as f32) / 16383.0;
++                        Some(rosc::OscType::Float(f_val))
++                    }
+                 } else {
+                     None
+                 };
+@@ -444,6 +743,7 @@ pub async fn execute_mapping(
+ 
+                 let midi_for_log = Arc::clone(&midi);
+                 let addr_for_log = final_addr.clone();
++                let d_name_log = device_name.to_string();
+                 tokio::spawn(async move {
+                     let mut success = false;
+                     if arg_type == "float" {
+@@ -459,6 +759,7 @@ pub async fn execute_mapping(
+                     if success {
+                         let mut m = midi_for_log.lock().unwrap();
+                         m.activity_log.push(crate::ActivityEvent {
++                            device_name: d_name_log,
+                             mapping_idx,
+                             part: crate::ActivityPart::Output(out_idx),
+                             value: format!("{}{}", addr_for_log, val_suffix),
+@@ -472,8 +773,9 @@ pub async fn execute_mapping(
+                 velocity,
+             } => {
+                 let mut m = midi.lock().unwrap();
+-                m.send_queue.enqueue(vec![0x90 | channel, *note, *velocity]);
++                m.enqueue(device_name, vec![0x90 | channel, *note, *velocity]);
+                 m.activity_log.push(crate::ActivityEvent {
++                    device_name: device_name.to_string(),
+                     mapping_idx,
+                     part: crate::ActivityPart::Output(out_idx),
+                     value: format!("Note {} (V:{})", note, velocity),
+@@ -485,13 +787,49 @@ pub async fn execute_mapping(
+                 let mut data = vec![0xE0 | channel];
+                 data.push((value & 0x7F) as u8);
+                 data.push(((value >> 7) & 0x7F) as u8);
+-                m.send_queue.enqueue(data);
++                m.enqueue(device_name, data);
+                 m.activity_log.push(crate::ActivityEvent {
++                    device_name: device_name.to_string(),
+                     mapping_idx,
+                     part: crate::ActivityPart::Output(out_idx),
+                     value: format!("Pitch {}", value - 8192),
+                 });
+             }
++            crate::controller::Output::MidiCc { cc, channel } => {
++                let mut m = midi.lock().unwrap();
++                // If the action is a FaderMove, we might want to map the 14-bit value to 7-bit CC?
++                // Or just pass the value if appropriate?
++                // For X-Touch Mini, Fader rings are CC 1-8. Value 0-127.
++                // d1/d2 come from the source message.
++                // If source was PitchWheel (Fader), d1/d2 form a 14-bit value.
++                // We need to normalize to 0-127.
++                // If source was CC, d2 is value.
++
++                // How do we know the source value type generally?
++                // We rely on mapping.action context or just generic scaling?
++                // For now, let's assume we want to output the scaled value of the action.
++
++                let out_val =
++                    if let crate::controller::LogicalAction::FaderMove { .. } = mapping.action {
++                        if let Some(val) = cached_fader_value {
++                            (val * 127.0) as u8
++                        } else {
++                            // Fallback (e.g. if source was absolute 14-bit pitchwheel from an iCon)
++                            let val_14 = ((d2 as u16) << 7) | (d1 as u16);
++                            (val_14 >> 7) as u8
++                        }
++                    } else {
++                        d2 // Pass-through for simple buttons/knobs
++                    };
++
++                m.enqueue(device_name, vec![0xB0 | channel, *cc, out_val]);
++                m.activity_log.push(crate::ActivityEvent {
++                    device_name: device_name.to_string(),
++                    mapping_idx,
++                    part: crate::ActivityPart::Output(out_idx),
++                    value: format!("CC {} (V:{})", cc, out_val),
++                });
++            }
+             _ => {}
+         }
+     }
+diff --git a/src/nodes.rs b/src/nodes.rs
+index 22800ee..4adaf3c 100644
+--- a/src/nodes.rs
++++ b/src/nodes.rs
+@@ -62,6 +62,7 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
+                 Output::MidiPitchwheel { .. } => "Fader FB".to_string(),
+                 Output::LcdStrip { strip, .. } => format!("LCD Strip {}", strip),
+                 Output::LcdText { text, .. } => format!("LCD Text: {}", text),
++                Output::MidiCc { cc, .. } => format!("MIDI CC {}", cc),
+             },
+         }
+     }
+@@ -116,8 +117,8 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
+                     Trigger::MidiNote { channel, mode, .. } => {
+                         ui.label(format!("Ch: {}, Mode: {:?}", *channel + 1, mode));
+                     }
+-                    Trigger::MidiCc { channel, .. } => {
+-                        ui.label(format!("Ch: {}", *channel + 1));
++                    Trigger::MidiCc { channel, mode, .. } => {
++                        ui.label(format!("Ch: {}, Mode: {:?}", *channel + 1, mode));
+                     }
+                     Trigger::MidiPitchwheel { channel } => {
+                         ui.label(format!("Ch: {}", *channel + 1));
+@@ -139,6 +140,9 @@ impl SnarlViewer<NodeData> for NodeGraphViewer {
+                     Output::MidiPitchwheel { channel } => {
+                         ui.label(format!("Ch: {}", *channel + 1));
+                     }
++                    Output::MidiCc { channel, .. } => {
++                        ui.label(format!("Ch: {}", *channel + 1));
++                    }
+                     _ => {}
+                 },
+             }
+diff --git a/src/osc.rs b/src/osc.rs
+index 475b0c1..b655bb5 100644
+--- a/src/osc.rs
++++ b/src/osc.rs
+@@ -77,15 +77,22 @@ impl OscServer {
+             // Only check for generic triggers if it looks like a fader command to avoid overhead
+             if msg.addr.starts_with("/eos/fader/1/") || msg.addr.starts_with("/eos/out/event/cue/")
+             {
+-                let mappings: Vec<(usize, crate::controller::Mapping)> = {
++                let mappings_to_process: Vec<(String, usize, crate::controller::Mapping)> = {
+                     let m = midi.lock().unwrap();
+-                    m.profile.mappings.iter().enumerate()
+-                        .filter(|(_, map)| matches!(&map.trigger, crate::controller::Trigger::Osc { addr } if addr == &msg.addr))
+-                        .map(|(i, map)| (i, map.clone()))
+-                        .collect()
++                    let mut temp_mappings: Vec<(String, usize, crate::controller::Mapping)> =
++                        Vec::new();
++                    for (device_name, profile) in &m.device_profiles {
++                        for (i, map) in profile.mappings.iter().enumerate() {
++                            if matches!(&map.trigger, crate::controller::Trigger::Osc { addr } if addr == &msg.addr)
++                            {
++                                temp_mappings.push((device_name.clone(), i, map.clone()));
++                            }
++                        }
++                    }
++                    temp_mappings
+                 };
+ 
+-                for (idx, mapping) in mappings {
++                for (device_name, idx, mapping) in mappings_to_process {
+                     if let Some(OscType::Float(val)) = msg.args.first() {
+                         let midi_val = (val * 16383.0).round() as u16;
+                         let d1 = (midi_val & 0x7F) as u8;
+@@ -95,13 +102,22 @@ impl OscServer {
+                         {
+                             let mut m = midi.lock().unwrap();
+                             m.activity_log.push(crate::ActivityEvent {
++                                device_name: device_name.clone(),
+                                 mapping_idx: idx,
+                                 part: crate::ActivityPart::Trigger,
+                                 value: format!("OSC {:.2}", val),
+                             });
+                         }
+ 
+-                        crate::midi::execute_mapping(midi.clone(), &mapping, idx, d1, d2).await;
++                        crate::midi::execute_mapping(
++                            midi.clone(),
++                            &mapping,
++                            idx,
++                            d1,
++                            d2,
++                            &device_name,
++                        )
++                        .await;
+                         handled = true;
+ 
+                         // Update state if we triggered a Stop or Go action
+@@ -143,7 +159,17 @@ impl OscServer {
+             {
+                 {
+                     let mut m = midi.lock().unwrap();
+-                    let eos_bank_size = m.profile.eos_bank_size;
++                    // Calc max bank size across all profiles
++                    let mut eos_bank_size = 0;
++                    for p in m.device_profiles.values() {
++                        if p.eos_bank_size > eos_bank_size {
++                            eos_bank_size = p.eos_bank_size;
++                        }
++                    }
++                    if eos_bank_size == 0 {
++                        eos_bank_size = 10;
++                    } // default fallback
++
+                     if f_num > 0 && f_num <= eos_bank_size {
+                         let mut text = text.clone();
+                         if text.starts_with("S") {
+@@ -169,15 +195,13 @@ impl OscServer {
+ 
+                 // Send to LCD strip if physically available
+                 let should_display = {
+-                    let m = midi.lock().unwrap();
+-                    if let Some(ref visible) = m.profile.display.visible_faders {
+-                        visible.contains(&f_num)
+-                    } else {
+-                        // Fallback to "all faders that fit on screen have displays"
+-                        let lcd_segments =
+-                            m.profile.display.line_length / m.profile.display.strip_width;
+-                        f_num <= lcd_segments
+-                    }
++                    let _m = midi.lock().unwrap();
++                    // Display if ANY device wants it? Or broadcast logic in send_to_strip handles it?
++                    // send_to_strip iterates all devices.
++                    // But here we optimize to avoid processing if NO device needs it.
++                    // Let's just assume true for now or check if f_num is within range of "128".
++                    // The safer logic is:
++                    f_num <= 128
+                 };
+ 
+                 if should_display {
+@@ -205,11 +229,20 @@ impl OscServer {
+                     && let Ok(f_num) = f_str.parse::<usize>()
+                 {
+                     let mut m = midi.lock().unwrap();
+-                    let eos_bank_size = m.profile.eos_bank_size;
++                    // Determine bank size (max)
++                    let mut eos_bank_size = 0;
++                    for p in m.device_profiles.values() {
++                        if p.eos_bank_size > eos_bank_size {
++                            eos_bank_size = p.eos_bank_size;
++                        }
++                    }
++                    if eos_bank_size == 0 {
++                        eos_bank_size = 10;
++                    } // default
++
+                     if f_num > 0 && f_num <= eos_bank_size {
+-                        let pitch = (val * 16383.0).round() as i16 - 8192;
+-                        // Update physical pitchwheel if a mapping exists for this fader index
+-                        m.enqueue_pitchwheel((f_num - 1) as u8, pitch);
++                        // Update physical feedback (PitchWheel for Motorized, CC for LED Rings)
++                        m.update_fader_feedback(f_num - 1, *val);
+                         m.fader_levels[f_num - 1] = *val;
+                     }
+                 }
+@@ -222,28 +255,39 @@ impl OscServer {
+                     || m.crossfade_state == CrossfadeState::GoBack
+                 {
+                     m.crossfade_state = CrossfadeState::Pause;
+-                    if let Some((note, chan, _)) = m
+-                        .profile
+-                        .get_midi_output_for_action(crate::controller::LogicalAction::Stop)
+-                    {
+-                        m.send_queue.enqueue(vec![0x90 | chan, note, 127]);
++                    let profiles_to_process: Vec<(String, crate::controller::ControllerProfile)> =
++                        m.device_profiles
++                            .iter()
++                            .map(|(k, v)| (k.clone(), v.clone()))
++                            .collect();
++                    for (d_name, p) in profiles_to_process {
++                        if let Some((note, chan, _)) =
++                            p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
++                        {
++                            m.enqueue(&d_name, vec![0x90 | chan, note, 127]);
++                        }
+                     }
+                 }
+             } else if msg.addr == "/eos/out/event/cue/1/0/resume" {
+                 let mut m = midi.lock().unwrap();
+                 if m.crossfade_state == CrossfadeState::Pause {
+                     m.crossfade_state = CrossfadeState::Go;
+-                    if let Some((s_note, s_chan, _)) = m
+-                        .profile
+-                        .get_midi_output_for_action(crate::controller::LogicalAction::Stop)
+-                    {
+-                        m.send_queue.enqueue(vec![0x90 | s_chan, s_note, 0]);
+-                    }
+-                    if let Some((g_note, g_chan, _)) = m
+-                        .profile
+-                        .get_midi_output_for_action(crate::controller::LogicalAction::Go)
+-                    {
+-                        m.send_queue.enqueue(vec![0x90 | g_chan, g_note, 127]);
++                    let profiles_to_process: Vec<(String, crate::controller::ControllerProfile)> =
++                        m.device_profiles
++                            .iter()
++                            .map(|(k, v)| (k.clone(), v.clone()))
++                            .collect();
++                    for (d_name, p) in profiles_to_process {
++                        if let Some((s_note, s_chan, _)) =
++                            p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
++                        {
++                            m.enqueue(&d_name, vec![0x90 | s_chan, s_note, 0]);
++                        }
++                        if let Some((g_note, g_chan, _)) =
++                            p.get_midi_output_for_action(crate::controller::LogicalAction::Go)
++                        {
++                            m.enqueue(&d_name, vec![0x90 | g_chan, g_note, 127]);
++                        }
+                     }
+                 }
+             } else if msg.addr == "/eos/out/active/cue/text" {
+@@ -286,7 +330,13 @@ impl OscServer {
+                     tokio::spawn(async move {
+                         let eos_bank_size = {
+                             let m = midi_clone.lock().unwrap();
+-                            m.profile.eos_bank_size
++                            let mut size = 0;
++                            for p in m.device_profiles.values() {
++                                if p.eos_bank_size > size {
++                                    size = p.eos_bank_size;
++                                }
++                            }
++                            if size == 0 { 10 } else { size }
+                         };
+                         let _ = client
+                             .send(

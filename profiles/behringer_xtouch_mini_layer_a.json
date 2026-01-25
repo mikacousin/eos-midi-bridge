@@ -1,0 +1,342 @@
+{
+    "name": "Behringer X-Touch Mini (Layer A)",
+    "eos_bank_size": 10,
+    "startup_messages": [
+        [
+            176,
+            1,
+            2
+        ],
+        [
+            176,
+            2,
+            2
+        ],
+        [
+            176,
+            3,
+            2
+        ],
+        [
+            176,
+            4,
+            2
+        ],
+        [
+            176,
+            5,
+            2
+        ],
+        [
+            176,
+            6,
+            2
+        ],
+        [
+            176,
+            7,
+            2
+        ],
+        [
+            176,
+            8,
+            2
+        ]
+    ],
+    "mappings": [
+        {
+            "trigger": {
+                "type": "midi_cc",
+                "cc": 1,
+                "channel": 10,
+                "mode": "relative_behringer"
+            },
+            "action": {
+                "type": "fader_move",
+                "index": 0
+            },
+            "outputs": [
+                {
+                    "type": "midi_cc",
+                    "cc": 1,
+                    "channel": 10
+                },
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/{page}1",
+                    "arg_type": "float"
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_cc",
+                "cc": 2,
+                "channel": 10,
+                "mode": "relative_behringer"
+            },
+            "action": {
+                "type": "fader_move",
+                "index": 1
+            },
+            "outputs": [
+                {
+                    "type": "midi_cc",
+                    "cc": 2,
+                    "channel": 10
+                },
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/{page}2",
+                    "arg_type": "float"
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_cc",
+                "cc": 3,
+                "channel": 10,
+                "mode": "relative_behringer"
+            },
+            "action": {
+                "type": "fader_move",
+                "index": 2
+            },
+            "outputs": [
+                {
+                    "type": "midi_cc",
+                    "cc": 3,
+                    "channel": 10
+                },
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/{page}3",
+                    "arg_type": "float"
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_cc",
+                "cc": 4,
+                "channel": 10,
+                "mode": "relative_behringer"
+            },
+            "action": {
+                "type": "fader_move",
+                "index": 3
+            },
+            "outputs": [
+                {
+                    "type": "midi_cc",
+                    "cc": 4,
+                    "channel": 10
+                },
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/{page}4",
+                    "arg_type": "float"
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_cc",
+                "cc": 5,
+                "channel": 10,
+                "mode": "relative_behringer"
+            },
+            "action": {
+                "type": "fader_move",
+                "index": 4
+            },
+            "outputs": [
+                {
+                    "type": "midi_cc",
+                    "cc": 5,
+                    "channel": 10
+                },
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/{page}5",
+                    "arg_type": "float"
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_cc",
+                "cc": 6,
+                "channel": 10,
+                "mode": "relative_behringer"
+            },
+            "action": {
+                "type": "fader_move",
+                "index": 5
+            },
+            "outputs": [
+                {
+                    "type": "midi_cc",
+                    "cc": 6,
+                    "channel": 10
+                },
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/{page}6",
+                    "arg_type": "float"
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_cc",
+                "cc": 7,
+                "channel": 10,
+                "mode": "relative_behringer"
+            },
+            "action": {
+                "type": "fader_move",
+                "index": 6
+            },
+            "outputs": [
+                {
+                    "type": "midi_cc",
+                    "cc": 7,
+                    "channel": 10
+                },
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/{page}7",
+                    "arg_type": "float"
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_cc",
+                "cc": 8,
+                "channel": 10,
+                "mode": "relative_behringer"
+            },
+            "action": {
+                "type": "fader_move",
+                "index": 7
+            },
+            "outputs": [
+                {
+                    "type": "midi_cc",
+                    "cc": 8,
+                    "channel": 10
+                },
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/{page}8",
+                    "arg_type": "float"
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_cc",
+                "cc": 9,
+                "channel": 10
+            },
+            "action": {
+                "type": "fader_move",
+                "index": 8
+            },
+            "outputs": [
+                {
+                    "type": "midi_cc",
+                    "cc": 9,
+                    "channel": 10
+                },
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/{page}9",
+                    "arg_type": "float"
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_note",
+                "note": 8,
+                "channel": 10,
+                "mode": "press"
+            },
+            "action": {
+                "type": "stop"
+            },
+            "outputs": [
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/0/stop",
+                    "arg_type": "void"
+                },
+                {
+                    "type": "midi_note",
+                    "note": 8,
+                    "channel": 10,
+                    "velocity": 127
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_note",
+                "note": 9,
+                "channel": 10,
+                "mode": "press"
+            },
+            "action": {
+                "type": "go"
+            },
+            "outputs": [
+                {
+                    "type": "osc",
+                    "addr": "/eos/fader/1/0/fire",
+                    "arg_type": "void"
+                },
+                {
+                    "type": "midi_note",
+                    "note": 9,
+                    "channel": 10,
+                    "velocity": 127
+                }
+            ]
+        },
+        {
+            "trigger": {
+                "type": "midi_note",
+                "note": 14,
+                "channel": 10,
+                "mode": "press"
+            },
+            "action": {
+                "type": "fader_page_down"
+            },
+            "outputs": []
+        },
+        {
+            "trigger": {
+                "type": "midi_note",
+                "note": 15,
+                "channel": 10,
+                "mode": "press"
+            },
+            "action": {
+                "type": "fader_page_up"
+            },
+            "outputs": []
+        }
+    ],
+    "display": {
+        "line_length": 0,
+        "line_offsets": [],
+        "strip_width": 0,
+        "sysex_prefix": [],
+        "visible_faders": []
+    }
+}

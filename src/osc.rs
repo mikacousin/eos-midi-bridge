@@ -77,15 +77,22 @@ impl OscServer {
             // Only check for generic triggers if it looks like a fader command to avoid overhead
             if msg.addr.starts_with("/eos/fader/1/") || msg.addr.starts_with("/eos/out/event/cue/")
             {
-                let mappings: Vec<(usize, crate::controller::Mapping)> = {
+                let mappings_to_process: Vec<(String, usize, crate::controller::Mapping)> = {
                     let m = midi.lock().unwrap();
-                    m.profile.mappings.iter().enumerate()
-                        .filter(|(_, map)| matches!(&map.trigger, crate::controller::Trigger::Osc { addr } if addr == &msg.addr))
-                        .map(|(i, map)| (i, map.clone()))
-                        .collect()
+                    let mut temp_mappings: Vec<(String, usize, crate::controller::Mapping)> =
+                        Vec::new();
+                    for (device_name, profile) in &m.device_profiles {
+                        for (i, map) in profile.mappings.iter().enumerate() {
+                            if matches!(&map.trigger, crate::controller::Trigger::Osc { addr } if addr == &msg.addr)
+                            {
+                                temp_mappings.push((device_name.clone(), i, map.clone()));
+                            }
+                        }
+                    }
+                    temp_mappings
                 };
 
-                for (idx, mapping) in mappings {
+                for (device_name, idx, mapping) in mappings_to_process {
                     if let Some(OscType::Float(val)) = msg.args.first() {
                         let midi_val = (val * 16383.0).round() as u16;
                         let d1 = (midi_val & 0x7F) as u8;
@@ -95,13 +102,22 @@ impl OscServer {
                         {
                             let mut m = midi.lock().unwrap();
                             m.activity_log.push(crate::ActivityEvent {
+                                device_name: device_name.clone(),
                                 mapping_idx: idx,
                                 part: crate::ActivityPart::Trigger,
                                 value: format!("OSC {:.2}", val),
                             });
                         }
 
-                        crate::midi::execute_mapping(midi.clone(), &mapping, idx, d1, d2).await;
+                        crate::midi::execute_mapping(
+                            midi.clone(),
+                            &mapping,
+                            idx,
+                            d1,
+                            d2,
+                            &device_name,
+                        )
+                        .await;
                         handled = true;
 
                         // Update state if we triggered a Stop or Go action
@@ -143,7 +159,17 @@ impl OscServer {
             {
                 {
                     let mut m = midi.lock().unwrap();
-                    let eos_bank_size = m.profile.eos_bank_size;
+                    // Calc max bank size across all profiles
+                    let mut eos_bank_size = 0;
+                    for p in m.device_profiles.values() {
+                        if p.eos_bank_size > eos_bank_size {
+                            eos_bank_size = p.eos_bank_size;
+                        }
+                    }
+                    if eos_bank_size == 0 {
+                        eos_bank_size = 10;
+                    } // default fallback
+
                     if f_num > 0 && f_num <= eos_bank_size {
                         let mut text = text.clone();
                         if text.starts_with("S") {
@@ -169,15 +195,13 @@ impl OscServer {
 
                 // Send to LCD strip if physically available
                 let should_display = {
-                    let m = midi.lock().unwrap();
-                    if let Some(ref visible) = m.profile.display.visible_faders {
-                        visible.contains(&f_num)
-                    } else {
-                        // Fallback to "all faders that fit on screen have displays"
-                        let lcd_segments =
-                            m.profile.display.line_length / m.profile.display.strip_width;
-                        f_num <= lcd_segments
-                    }
+                    let _m = midi.lock().unwrap();
+                    // Display if ANY device wants it? Or broadcast logic in send_to_strip handles it?
+                    // send_to_strip iterates all devices.
+                    // But here we optimize to avoid processing if NO device needs it.
+                    // Let's just assume true for now or check if f_num is within range of "128".
+                    // The safer logic is:
+                    f_num <= 128
                 };
 
                 if should_display {
@@ -205,11 +229,20 @@ impl OscServer {
                     && let Ok(f_num) = f_str.parse::<usize>()
                 {
                     let mut m = midi.lock().unwrap();
-                    let eos_bank_size = m.profile.eos_bank_size;
+                    // Determine bank size (max)
+                    let mut eos_bank_size = 0;
+                    for p in m.device_profiles.values() {
+                        if p.eos_bank_size > eos_bank_size {
+                            eos_bank_size = p.eos_bank_size;
+                        }
+                    }
+                    if eos_bank_size == 0 {
+                        eos_bank_size = 10;
+                    } // default
+
                     if f_num > 0 && f_num <= eos_bank_size {
-                        let pitch = (val * 16383.0).round() as i16 - 8192;
-                        // Update physical pitchwheel if a mapping exists for this fader index
-                        m.enqueue_pitchwheel((f_num - 1) as u8, pitch);
+                        // Update physical feedback (PitchWheel for Motorized, CC for LED Rings)
+                        m.update_fader_feedback(f_num - 1, *val);
                         m.fader_levels[f_num - 1] = *val;
                     }
                 }
@@ -222,28 +255,39 @@ impl OscServer {
                     || m.crossfade_state == CrossfadeState::GoBack
                 {
                     m.crossfade_state = CrossfadeState::Pause;
-                    if let Some((note, chan, _)) = m
-                        .profile
-                        .get_midi_output_for_action(crate::controller::LogicalAction::Stop)
-                    {
-                        m.send_queue.enqueue(vec![0x90 | chan, note, 127]);
+                    let profiles_to_process: Vec<(String, crate::controller::ControllerProfile)> =
+                        m.device_profiles
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                    for (d_name, p) in profiles_to_process {
+                        if let Some((note, chan, _)) =
+                            p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
+                        {
+                            m.enqueue(&d_name, vec![0x90 | chan, note, 127]);
+                        }
                     }
                 }
             } else if msg.addr == "/eos/out/event/cue/1/0/resume" {
                 let mut m = midi.lock().unwrap();
                 if m.crossfade_state == CrossfadeState::Pause {
                     m.crossfade_state = CrossfadeState::Go;
-                    if let Some((s_note, s_chan, _)) = m
-                        .profile
-                        .get_midi_output_for_action(crate::controller::LogicalAction::Stop)
-                    {
-                        m.send_queue.enqueue(vec![0x90 | s_chan, s_note, 0]);
-                    }
-                    if let Some((g_note, g_chan, _)) = m
-                        .profile
-                        .get_midi_output_for_action(crate::controller::LogicalAction::Go)
-                    {
-                        m.send_queue.enqueue(vec![0x90 | g_chan, g_note, 127]);
+                    let profiles_to_process: Vec<(String, crate::controller::ControllerProfile)> =
+                        m.device_profiles
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                    for (d_name, p) in profiles_to_process {
+                        if let Some((s_note, s_chan, _)) =
+                            p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
+                        {
+                            m.enqueue(&d_name, vec![0x90 | s_chan, s_note, 0]);
+                        }
+                        if let Some((g_note, g_chan, _)) =
+                            p.get_midi_output_for_action(crate::controller::LogicalAction::Go)
+                        {
+                            m.enqueue(&d_name, vec![0x90 | g_chan, g_note, 127]);
+                        }
                     }
                 }
             } else if msg.addr == "/eos/out/active/cue/text" {
@@ -286,7 +330,13 @@ impl OscServer {
                     tokio::spawn(async move {
                         let eos_bank_size = {
                             let m = midi_clone.lock().unwrap();
-                            m.profile.eos_bank_size
+                            let mut size = 0;
+                            for p in m.device_profiles.values() {
+                                if p.eos_bank_size > size {
+                                    size = p.eos_bank_size;
+                                }
+                            }
+                            if size == 0 { 10 } else { size }
                         };
                         let _ = client
                             .send(

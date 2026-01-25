@@ -20,6 +20,18 @@ pub enum MidiTriggerMode {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MidiCcTriggerMode {
+    Absolute,
+    // Standard relative: 1..64 = +1..+64, 65..127 = -1..-63
+    RelativeStandard,
+    // Behringer often uses: 1..7 (speed +) and 65..71 (speed -) OR 127/123 etc.
+    // Let's implement a generic "RelativeSigned" where < 64 is +, > 64 is -.
+    // For Behringer X-Touch Mini in 'Relative 1': CW = 1..7, CCW = 65..71.
+    RelativeBehringer,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Trigger {
     MidiNote {
@@ -30,6 +42,8 @@ pub enum Trigger {
     MidiCc {
         cc: u8,
         channel: u8,
+        #[serde(default = "default_cc_mode")]
+        mode: MidiCcTriggerMode,
     },
     MidiPitchwheel {
         channel: u8,
@@ -63,6 +77,7 @@ impl Trigger {
             0xB0 => Some(Trigger::MidiCc {
                 cc: d1,
                 channel: chan,
+                mode: MidiCcTriggerMode::Absolute, // Default for sniffing
             }),
             0xE0 => Some(Trigger::MidiPitchwheel { channel: chan }),
             _ => None,
@@ -94,6 +109,10 @@ pub enum Output {
         line: u8,
         text: String,
     },
+    MidiCc {
+        cc: u8,
+        channel: u8,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
@@ -121,6 +140,8 @@ pub struct ControllerProfile {
     pub eos_bank_size: usize,
     pub display: DisplayProfile,
     pub mappings: Vec<Mapping>,
+    #[serde(default)]
+    pub startup_messages: Vec<Vec<u8>>,
 }
 
 impl Default for ControllerProfile {
@@ -135,6 +156,7 @@ impl Default for ControllerProfile {
                 line_offsets: vec![56, 0],
                 visible_faders: None,
             },
+            startup_messages: Vec::new(),
             mappings: vec![
                 // Example: Go button
                 Mapping {
@@ -210,18 +232,25 @@ impl ControllerProfile {
                     // Determine the feedback OSC address (1-indexed based on index)
                     let feedback_addr = format!("/eos/fader/1/{}", index + 1);
 
-                    // Synthesize MIDI Pitchwheel output for motor feedback
-                    let feedback_outputs = vec![Output::MidiPitchwheel {
-                        channel: index as u8,
-                    }];
+                    // Use existing MIDI outputs (CC or PitchWheel) for feedback
+                    let feedback_outputs: Vec<Output> = mapping
+                        .outputs
+                        .iter()
+                        .filter(|o| {
+                            matches!(o, Output::MidiCc { .. } | Output::MidiPitchwheel { .. })
+                        })
+                        .cloned()
+                        .collect();
 
-                    new_mappings.push(Mapping {
-                        trigger: Trigger::Osc {
-                            addr: feedback_addr,
-                        },
-                        action: mapping.action.clone(),
-                        outputs: feedback_outputs,
-                    });
+                    if !feedback_outputs.is_empty() {
+                        new_mappings.push(Mapping {
+                            trigger: Trigger::Osc {
+                                addr: feedback_addr,
+                            },
+                            action: mapping.action.clone(),
+                            outputs: feedback_outputs,
+                        });
+                    }
                 }
                 LogicalAction::Go => {
                     new_mappings.push(Mapping {
@@ -293,6 +322,14 @@ impl ControllerProfile {
                 let matched = match output {
                     Output::MidiNote { channel, note, .. } => matches_note(msg, *channel, *note),
                     Output::MidiPitchwheel { channel } => matches_pitch(msg, *channel),
+                    Output::MidiCc { channel, cc } => {
+                        // Check if msg is CC and matches channel/cc
+                        if msg.len() >= 3 && (msg[0] & 0xF0) == 0xB0 {
+                            (msg[0] & 0x0F) == *channel && msg[1] == *cc
+                        } else {
+                            false
+                        }
+                    }
                     _ => false,
                 };
 
@@ -313,4 +350,8 @@ pub fn load_profile(path: &str) -> Result<ControllerProfile> {
         .with_context(|| format!("Failed to parse controller profile JSON: {}", path))?;
 
     Ok(profile)
+}
+
+fn default_cc_mode() -> MidiCcTriggerMode {
+    MidiCcTriggerMode::Absolute
 }

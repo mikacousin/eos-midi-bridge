@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 // ============================================================================
 
 pub enum MackieEvent {
-    MidiIn(Vec<u8>),
+    MidiIn { device_name: String, data: Vec<u8> },
 }
 
 pub enum SystemCommand {
@@ -37,6 +37,7 @@ pub enum ActivityPart {
 
 #[derive(Debug, Clone)]
 pub struct ActivityEvent {
+    pub device_name: String,
     pub mapping_idx: usize,
     pub part: ActivityPart,
     pub value: String,
