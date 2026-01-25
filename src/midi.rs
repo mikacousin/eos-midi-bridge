@@ -84,10 +84,20 @@ impl Midi {
         self.send_queue.enqueue((target_device.to_string(), data));
     }
 
-    pub fn update_fader_feedback(&mut self, fader_index: usize, value: f32) {
+    pub fn update_fader_feedback(
+        &mut self,
+        fader_index: usize,
+        value: f32,
+        exclude_device: Option<&str>,
+    ) {
         let mut logs = Vec::new();
         // Iterate over all devices and check their profiles
         for (device_name, profile) in &self.device_profiles {
+            if let Some(ex) = exclude_device {
+                if device_name == ex {
+                    continue;
+                }
+            }
             // Find mappings for FaderMove { index }
             for (map_idx, mapping) in profile.mappings.iter().enumerate() {
                 if let crate::controller::LogicalAction::FaderMove { index } = mapping.action
@@ -689,6 +699,9 @@ pub async fn execute_mapping(
 
                 if allow_update && *index < m.fader_levels.len() {
                     m.fader_levels[*index] = final_v;
+                    // Local Feedback: Update other controllers immediately
+                    m.update_fader_feedback(*index, final_v, Some(device_name));
+
                     cached_fader_value = Some(final_v);
                     m.activity_log.push(crate::ActivityEvent {
                         device_name: device_name.to_string(),

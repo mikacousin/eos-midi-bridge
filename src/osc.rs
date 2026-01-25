@@ -266,7 +266,7 @@ impl OscServer {
 
                     if f_num > 0 && f_num <= eos_bank_size {
                         // Update physical feedback (PitchWheel for Motorized, CC for LED Rings)
-                        m.update_fader_feedback(f_num - 1, *val);
+                        m.update_fader_feedback(f_num - 1, *val, None);
                         m.fader_levels[f_num - 1] = *val;
                     }
                 }
