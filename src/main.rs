@@ -96,6 +96,7 @@ fn main() -> anyhow::Result<()> {
                 let mut m = supervision_midi.lock().unwrap();
                 m.device_connections.clear();
                 m.device_profiles.clear();
+                m.device_fader_values.clear();
 
                 for (device_name, profile_path) in &config.enabled_devices {
                     match controller::load_profile(profile_path) {

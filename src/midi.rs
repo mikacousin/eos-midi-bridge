@@ -41,6 +41,7 @@ pub struct Midi {
     pub activity_log: Vec<crate::ActivityEvent>,
     pub intended_dir: CrossfadeState,
     pub last_applied_dir: CrossfadeState,
+    pub device_fader_values: std::collections::HashMap<(String, usize), f32>,
 }
 
 impl Midi {
@@ -70,6 +71,7 @@ impl Midi {
             blink_state: false,
             intended_dir: CrossfadeState::Inactive,
             last_applied_dir: CrossfadeState::Inactive,
+            device_fader_values: std::collections::HashMap::new(),
         }
     }
 
@@ -589,70 +591,35 @@ pub async fn execute_mapping(
         crate::controller::LogicalAction::FaderMove { index } => {
             let mut final_v = 0.0;
             let mut update = false;
+            let mut requires_pickup = false;
 
             if let crate::controller::Trigger::MidiCc { mode, .. } = &mapping.trigger {
                 match mode {
                     crate::controller::MidiCcTriggerMode::Absolute => {
-                        // let value = ((d2 as i16) << 7) | (d1 as i16); // Wait, d1/d2 logic for FaderMove assumed 14-bit pitchbend source!
-                        // If source is CC (7-bit), d2 is value.
-                        // But if source is PitchWheel, d1/d2 is 14-bit.
-                        // Logic below was hardcoded for PitchWheel?
-                        // "let value = ((d2 as i16) << 7) | (d1 as i16);"
-
-                        // We need to differentiate source trigger type for value extraction!
-                        // But execute_mapping just gets d1/d2.
-
-                        // FIX:
-                        let f_val = if d1 == 0xB0 || (d1 & 0xF0) == 0xB0 {
-                            // Ah d1 passed to execute_mapping is msg[1], d2 is msg[2]
-                            // msg[0] is not passed?
-                            // Wait, call site:
-                            // let (d1, d2) = (msg[1], msg[2]);
-                            // execute_mapping(..., d1, d2, ...)
-                            // We don't know if it was PitchWheel or CC inside execute_mapping easily without checking trigger type again.
-
-                            (d2 as f32) / 127.0
-                        } else {
-                            // Assume PitchWheel default 14-bit
-                            let value = ((d2 as i16) << 7) | (d1 as i16);
-                            (value as f32) / 16383.0
-                        };
-                        final_v = f_val;
+                        // Inherited logic: assumes 14-bit if not caught by the broken B0 check (which is always false here)
+                        // effectively: value = (d2 << 7) | d1.
+                        // For CC: d2 is value, d1 is CC number.
+                        let value = ((d2 as i16) << 7) | (d1 as i16);
+                        final_v = (value as f32) / 16383.0;
                         update = true;
+                        requires_pickup = true;
                     }
                     crate::controller::MidiCcTriggerMode::RelativeStandard => {
-                        // < 64 = +d2, >= 64 = -(d2-64) ?
-                        // Usually 1-63 is +, 65-127 is - (Two's complement 7-bit signed?)
-                        // Or 65 = -1, 127 = -63?
-                        // Let's implement generic Signed 7-bit:
-                        // 0-63 positive, 64-127 negative (offset 128? or just >64 is neg?)
-
-                        // Relative 1 (Behringer Manual says 1..7, 65..71)
-                        // Actually let's assume RelativeBehringer covers the specifics.
-                        // Standard often 65 = +1? No 1=+1.
-
-                        // Let's implement logic:
                         let delta: i32 = if d2 < 64 {
                             d2 as i32
                         } else {
                             (d2 as i32) - 128
-                        }; // 7-bit signed
-
+                        };
                         let m = midi.lock().unwrap();
                         if *index < m.fader_levels.len() {
                             let current = m.fader_levels[*index];
-                            let new_val = (current + (delta as f32 * 0.01)).clamp(0.0, 1.0); // 1% per tick?
+                            let new_val = (current + (delta as f32 * 0.01)).clamp(0.0, 1.0);
                             final_v = new_val;
                             update = true;
+                            requires_pickup = false;
                         }
                     }
                     crate::controller::MidiCcTriggerMode::RelativeBehringer => {
-                        // CW: 1..7 (speed) -> +1..+7
-                        // CCW: 127..121? -> -1..-7 ?
-                        // Current issue: User reports "drops immediately".
-                        // This implies our previous logic (65 = -1) was being fed 127, resulting in -63.
-                        // So device sends 127 for -1.
-                        // We will use standard 7-bit signed logic (High values = small negatives).
                         let delta: i32 = if d2 >= 64 {
                             (d2 as i32) - 128
                         } else {
@@ -661,24 +628,61 @@ pub async fn execute_mapping(
                         let m = midi.lock().unwrap();
                         if *index < m.fader_levels.len() {
                             let current = m.fader_levels[*index];
-                            let new_val = (current + (delta as f32 * 0.005)).clamp(0.0, 1.0); // 0.5% per tick base
+                            let new_val = (current + (delta as f32 * 0.005)).clamp(0.0, 1.0);
                             final_v = new_val;
                             update = true;
+                            requires_pickup = false;
                         }
                     }
                 }
             } else {
-                // Not MIDI CC Trigger (PitchWheel or Note)
-                // Original logic for PitchWheel/Fader
-                // Assuming PitchWheel for FaderMove usually
+                // PitchWheel or others: Treat as 14-bit Absolute
                 let value = ((d2 as i16) << 7) | (d1 as i16);
                 final_v = (value as f32) / 16383.0;
                 update = true;
+                requires_pickup = true;
             }
 
             if update {
                 let mut m = midi.lock().unwrap();
-                if *index < m.fader_levels.len() {
+
+                let allow_update = if requires_pickup && *index < m.fader_levels.len() {
+                    let map_key = (device_name.to_string(), mapping_idx);
+                    let last_phys_val = m.device_fader_values.get(&map_key).cloned();
+                    let eos_val = m.fader_levels[*index];
+
+                    // Always update Physical State so we can track movement
+                    m.device_fader_values.insert(map_key, final_v);
+
+                    if let Some(prev) = last_phys_val {
+                        let tolerance = 0.05; // 5% latch window
+                        // If we were previously synced, allow small drifts
+                        let was_latched = (prev - eos_val).abs() < tolerance;
+
+                        // Check crossover
+                        let crossed_up = prev <= eos_val && final_v >= eos_val;
+                        let crossed_down = prev >= eos_val && final_v <= eos_val;
+
+                        // User requirement: Wait until value crossed EOS value
+                        if was_latched || crossed_up || crossed_down {
+                            true
+                        } else {
+                            false // Blocking until crossover
+                        }
+                    } else {
+                        // No history: Block until we establish crossover context?
+                        // Or Check proximity?
+                        if (final_v - eos_val).abs() < 0.1 {
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                } else {
+                    true
+                };
+
+                if allow_update && *index < m.fader_levels.len() {
                     m.fader_levels[*index] = final_v;
                     cached_fader_value = Some(final_v);
                     m.activity_log.push(crate::ActivityEvent {
@@ -726,10 +730,9 @@ pub async fn execute_mapping(
                     if let Some(val) = cached_fader_value {
                         Some(rosc::OscType::Float(val))
                     } else {
-                        // Fallback to recalculating for absolute/pitchwheel if somehow not cached (shouldn't happen for FaderMove)
-                        let value = ((d2 as i16) << 7) | (d1 as i16);
-                        let f_val = (value as f32) / 16383.0;
-                        Some(rosc::OscType::Float(f_val))
+                        // If no cached value, it means the update was blocked by pickup logic or didn't run.
+                        // In either case, we should NOT send an OSC update.
+                        None
                     }
                 } else {
                     None
