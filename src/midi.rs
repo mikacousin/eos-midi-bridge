@@ -324,10 +324,10 @@ impl Midi {
             // Re-using set_crossfade_state logic might be cleaner but it resets blink state.
             // Let's iterate:
             for (device_name, profile) in &self.device_profiles {
-                if let Some((n, c, _)) =
+                if let Some((n, c, on_vel)) =
                     profile.get_midi_output_for_action(crate::controller::LogicalAction::Go)
                 {
-                    let v = if self.blink_state { 127 } else { 0 };
+                    let v = if self.blink_state { on_vel } else { 0 };
                     self.enqueue(device_name, vec![0x90 | c, n, v]);
                 }
             }

@@ -271,7 +271,7 @@
         {
             "trigger": {
                 "type": "midi_note",
-                "note": 8,
+                "note": 21,
                 "channel": 10,
                 "mode": "press"
             },
@@ -286,16 +286,16 @@
                 },
                 {
                     "type": "midi_note",
-                    "note": 8,
+                    "note": 21,
                     "channel": 10,
-                    "velocity": 127
+                    "velocity": 1
                 }
             ]
         },
         {
             "trigger": {
                 "type": "midi_note",
-                "note": 9,
+                "note": 22,
                 "channel": 10,
                 "mode": "press"
             },
@@ -310,16 +310,16 @@
                 },
                 {
                     "type": "midi_note",
-                    "note": 9,
+                    "note": 22,
                     "channel": 10,
-                    "velocity": 127
+                    "velocity": 1
                 }
             ]
         },
         {
             "trigger": {
                 "type": "midi_note",
-                "note": 14,
+                "note": 8,
                 "channel": 10,
                 "mode": "press"
             },
@@ -331,7 +331,7 @@
         {
             "trigger": {
                 "type": "midi_note",
-                "note": 15,
+                "note": 9,
                 "channel": 10,
                 "mode": "press"
             },
