@@ -195,16 +195,9 @@ fn main() -> anyhow::Result<()> {
                         _ = interval.tick() => {
                             if let Ok(mut m) = pump_midi.lock() {
                                 while let Some((target_device, msg)) = m.send_queue.dequeue() {
-                                    // VISUAL FEEDBACK
-                                    let matches = m.find_mappings_for_midi_message(&msg, &target_device);
-                                    for (idx, part) in matches {
-                                        m.activity_log.push(eos_midi_bridge::ActivityEvent {
-                                            device_name: target_device.clone(),
-                                            mapping_idx: idx,
-                                            part,
-                                            value: "Output".to_string(),
-                                        });
-                                    }
+                                    // VISUAL FEEDBACK: Removed to avoid overwriting specific logs from midi.rs
+                                    // let matches = m.find_mappings_for_midi_message(&msg, &target_device);
+                                    // ...
 
                                     if let Some(conn) = m.device_connections.get_mut(&target_device) {
                                         let _ = conn.send(&msg);
