@@ -72,7 +72,7 @@
                 },
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/{page}1",
+                    "addr": "/eos/user/1/fader/1/1",
                     "arg_type": "float"
                 }
             ]
@@ -96,7 +96,7 @@
                 },
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/{page}2",
+                    "addr": "/eos/user/1/fader/1/2",
                     "arg_type": "float"
                 }
             ]
@@ -120,7 +120,7 @@
                 },
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/{page}3",
+                    "addr": "/eos/user/1/fader/1/3",
                     "arg_type": "float"
                 }
             ]
@@ -144,7 +144,7 @@
                 },
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/{page}4",
+                    "addr": "/eos/user/1/fader/1/4",
                     "arg_type": "float"
                 }
             ]
@@ -168,7 +168,7 @@
                 },
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/{page}5",
+                    "addr": "/eos/user/1/fader/1/5",
                     "arg_type": "float"
                 }
             ]
@@ -192,7 +192,7 @@
                 },
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/{page}6",
+                    "addr": "/eos/user/1/fader/1/6",
                     "arg_type": "float"
                 }
             ]
@@ -216,7 +216,7 @@
                 },
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/{page}7",
+                    "addr": "/eos/user/1/fader/1/7",
                     "arg_type": "float"
                 }
             ]
@@ -240,7 +240,7 @@
                 },
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/{page}8",
+                    "addr": "/eos/user/1/fader/1/8",
                     "arg_type": "float"
                 }
             ]
@@ -263,7 +263,7 @@
                 },
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/{page}9",
+                    "addr": "/eos/user/1/fader/1/9",
                     "arg_type": "float"
                 }
             ]
@@ -281,8 +281,8 @@
             "outputs": [
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/0/stop",
-                    "arg_type": "void"
+                    "addr": "/eos/user/1/key/stop",
+                    "arg_type": "none"
                 },
                 {
                     "type": "midi_note",
@@ -305,8 +305,8 @@
             "outputs": [
                 {
                     "type": "osc",
-                    "addr": "/eos/fader/1/0/fire",
-                    "arg_type": "void"
+                    "addr": "/eos/user/1/key/go_0",
+                    "arg_type": "none"
                 },
                 {
                     "type": "midi_note",
