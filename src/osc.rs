@@ -11,28 +11,42 @@ pub struct OscClient {
     pub host: String,
     pub port: u16,
     pub socket: Arc<UdpSocket>,
+    pub log_sender: tokio::sync::mpsc::Sender<crate::LogEntry>,
 }
 
 impl OscClient {
-    pub async fn new(host: &str, port: u16) -> anyhow::Result<Self> {
+    pub async fn new(
+        host: &str,
+        port: u16,
+        log_sender: tokio::sync::mpsc::Sender<crate::LogEntry>,
+    ) -> anyhow::Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         Ok(Self {
             host: host.to_string(),
             port,
             socket: Arc::new(socket),
+            log_sender,
         })
     }
 
     pub async fn send(&self, path: &str, args: Vec<OscType>) -> anyhow::Result<()> {
         let msg = OscMessage {
             addr: path.to_string(),
-            args,
+            args: args.clone(),
         };
         let packet = OscPacket::Message(msg);
         let buf = rosc::encoder::encode(&packet)?;
         self.socket
             .send_to(&buf, format!("{}:{}", self.host, self.port))
             .await?;
+
+        // Log Output
+        let _ = self.log_sender.try_send(crate::LogEntry {
+            time: std::time::Instant::now(),
+            source: crate::LogSource::OscOut,
+            content: format!("{} {:?}", path, args),
+        });
+
         Ok(())
     }
 }
@@ -69,6 +83,16 @@ impl OscServer {
     pub async fn handle_packet(&self, packet: OscPacket, midi: &Arc<Mutex<Midi>>) {
         if let OscPacket::Message(msg) = packet {
             debug!("Received OSC from Eos: {} args: {:?}", msg.addr, msg.args);
+
+            // Log Input
+            {
+                let m = midi.lock().unwrap();
+                let _ = m.log_sender.try_send(crate::LogEntry {
+                    time: std::time::Instant::now(),
+                    source: crate::LogSource::OscIn,
+                    content: format!("{} {:?}", msg.addr, msg.args),
+                });
+            }
 
             let parts: Vec<&str> = msg.addr.split('/').collect();
 

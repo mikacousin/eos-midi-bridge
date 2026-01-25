@@ -35,14 +35,19 @@ fn main() -> anyhow::Result<()> {
     // Setup Channels
     let (tx_midi, mut rx_midi) = mpsc::channel::<MackieEvent>(100);
     let (tx_system, mut rx_system) = mpsc::channel::<SystemCommand>(10);
+    let (tx_log, rx_log) = mpsc::channel::<eos_midi_bridge::LogEntry>(500);
 
     // Initialize Shared Midi State (start with dummy OSC client, will be replaced)
     let rt_handle = rt.handle().clone();
     let osc_client = rt_handle
-        .block_on(OscClient::new(&cfg.eos_ip, cfg.eos_osc_port))
+        .block_on(OscClient::new(
+            &cfg.eos_ip,
+            cfg.eos_osc_port,
+            tx_log.clone(),
+        ))
         .context("Failed to create initial OSC client")?;
 
-    let midi = Arc::new(Mutex::new(Midi::new(osc_client)));
+    let midi = Arc::new(Mutex::new(Midi::new(osc_client, tx_log.clone())));
 
     // Background Event Processor (always running)
     let midi_logic = Arc::clone(&midi);
@@ -172,8 +177,13 @@ fn main() -> anyhow::Result<()> {
             // Let the server bind
             tokio::time::sleep(Duration::from_millis(100)).await;
 
+            let m_log_sender = {
+                let m = supervision_midi.lock().unwrap();
+                m.log_sender.clone()
+            };
+
             // Create new OSC client with updated config
-            match OscClient::new(&config.eos_ip, config.eos_osc_port).await {
+            match OscClient::new(&config.eos_ip, config.eos_osc_port, m_log_sender.clone()).await {
                 Ok(new_client) => {
                     let mut m = supervision_midi.lock().unwrap();
                     m.osc_client = new_client.clone();
@@ -202,6 +212,12 @@ fn main() -> anyhow::Result<()> {
 
                                     if let Some(conn) = m.device_connections.get_mut(&target_device) {
                                         let _ = conn.send(&msg);
+                                        // Log Output
+                                        let _ = m.log_sender.try_send(eos_midi_bridge::LogEntry {
+                                            time: std::time::Instant::now(),
+                                            source: eos_midi_bridge::LogSource::MidiOut,
+                                            content: format!("{} -> {:02X?}", target_device, msg),
+                                        });
                                     }
                                 }
                             }
@@ -322,7 +338,14 @@ fn main() -> anyhow::Result<()> {
     let gui_result = eframe::run_native(
         "Eos Mackie Bridge",
         options,
-        Box::new(move |_cc| Ok(Box::new(gui::BridgeApp::new(app_midi, cfg, app_tx_system)))),
+        Box::new(move |_cc| {
+            Ok(Box::new(gui::BridgeApp::new(
+                app_midi,
+                cfg,
+                app_tx_system,
+                rx_log,
+            )))
+        }),
     );
 
     // Shutdown and Reset
@@ -366,10 +389,20 @@ fn setup_midi_devices(
             let tx_clone = tx.clone();
             let d_name_log = device_name.clone();
             let d_name_event = d_name_log.clone();
+            let midi_state_clone = midi_state.clone();
             match midi_in.connect(
                 &in_port,
                 "bridge-in-conn",
                 move |_, msg, _| {
+                    // Log Input
+                    if let Ok(m) = midi_state_clone.lock() {
+                        let _ = m.log_sender.try_send(eos_midi_bridge::LogEntry {
+                            time: std::time::Instant::now(),
+                            source: eos_midi_bridge::LogSource::MidiIn,
+                            content: format!("{} <- {:02X?}", d_name_log, msg),
+                        });
+                    }
+
                     if let Err(e) = tx_clone.blocking_send(MackieEvent::MidiIn {
                         device_name: d_name_event.clone(),
                         data: msg.to_vec(),

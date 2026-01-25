@@ -12,6 +12,21 @@ use std::sync::{Arc, Mutex};
 // Types & Messaging
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LogSource {
+    MidiIn,
+    MidiOut,
+    OscIn,
+    OscOut,
+}
+
+#[derive(Clone)]
+pub struct LogEntry {
+    pub time: std::time::Instant,
+    pub source: LogSource,
+    pub content: String,
+}
+
 pub enum MackieEvent {
     MidiIn { device_name: String, data: Vec<u8> },
 }

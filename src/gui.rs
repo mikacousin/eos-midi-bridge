@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
-    NodeGraph,
     Console,
+    NodeGraph,
+    Logs,
     Settings,
 }
 
@@ -28,6 +29,11 @@ pub struct BridgeApp {
     pub show_quit_confirmation: bool,
     pub allowed_to_close: bool,
     pub selected_controller_for_graph: Option<String>,
+
+    // Logs State
+    log_receiver: mpsc::Receiver<eos_midi_bridge::LogEntry>,
+    logs: [std::collections::VecDeque<eos_midi_bridge::LogEntry>; 4],
+    log_filters: [bool; 4], // MidiIn, MidiOut, OscIn, OscOut
 }
 
 pub struct MappingNodeIds {
@@ -41,6 +47,7 @@ impl BridgeApp {
         midi: Arc<Mutex<Midi>>,
         config: BridgeConfig,
         tx_system: mpsc::Sender<SystemCommand>,
+        log_receiver: mpsc::Receiver<eos_midi_bridge::LogEntry>,
     ) -> Self {
         let mut app = Self {
             midi: midi.clone(),
@@ -58,6 +65,9 @@ impl BridgeApp {
             show_quit_confirmation: false,
             allowed_to_close: false,
             selected_controller_for_graph: None,
+            log_receiver,
+            logs: std::array::from_fn(|_| std::collections::VecDeque::new()),
+            log_filters: [true, true, true, true],
         };
 
         // Pre-populate the node graph with the current profile
@@ -180,6 +190,23 @@ impl eframe::App for BridgeApp {
             ctx.request_repaint();
         }
 
+        // --- Consume Logs ---
+        while let Ok(entry) = self.log_receiver.try_recv() {
+            let idx = match entry.source {
+                eos_midi_bridge::LogSource::MidiIn => 0,
+                eos_midi_bridge::LogSource::MidiOut => 1,
+                eos_midi_bridge::LogSource::OscIn => 2,
+                eos_midi_bridge::LogSource::OscOut => 3,
+            };
+
+            let buffer = &mut self.logs[idx];
+            if buffer.len() > 1000 {
+                buffer.pop_front();
+            }
+            buffer.push_back(entry);
+            ctx.request_repaint();
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_enabled_ui(main_enabled, |ui| {
                 let mut populate_needed = None;
@@ -223,6 +250,7 @@ impl eframe::App for BridgeApp {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.active_tab, Tab::Console, "🎛 Simple View");
                     ui.selectable_value(&mut self.active_tab, Tab::NodeGraph, "🕸 Advanced View");
+                    ui.selectable_value(&mut self.active_tab, Tab::Logs, "📝 Logs");
                     ui.selectable_value(&mut self.active_tab, Tab::Settings, "⚙ Settings");
                 });
 
@@ -338,6 +366,79 @@ impl eframe::App for BridgeApp {
                                 }
                                 Err(_) => {
                                     ui.label("⚠ Unable to read cue");
+                                }
+                            }
+                        });
+                    }
+
+                    Tab::Logs => {
+                        ui.horizontal(|ui| {
+                             ui.toggle_value(&mut self.log_filters[0], "MIDI IN");
+                             ui.toggle_value(&mut self.log_filters[1], "MIDI OUT");
+                             ui.toggle_value(&mut self.log_filters[2], "OSC IN");
+                             ui.toggle_value(&mut self.log_filters[3], "OSC OUT");
+
+                             if ui.button("Clear Logs").clicked() {
+                                 for buffer in &mut self.logs {
+                                     buffer.clear();
+                                 }
+                             }
+                        });
+                        ui.separator();
+
+                        // 4 Column Layout
+                        use eos_midi_bridge::LogSource;
+                        let column_sources = [
+                            LogSource::MidiIn,
+                            LogSource::MidiOut,
+                            LogSource::OscIn,
+                            LogSource::OscOut
+                        ];
+
+                        let total_width = ui.available_width();
+                        let col_width = total_width / 4.0;
+                        let col_height = ui.available_height();
+
+                        ui.horizontal(|ui| {
+                            for (i, source) in column_sources.iter().enumerate() {
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(col_width, col_height),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        ui.set_min_width(col_width);
+                                        ui.set_max_width(col_width);
+
+                                        // Header
+                                        ui.vertical_centered(|ui| {
+                                            ui.strong(format!("{:?}", source));
+                                        });
+                                        ui.separator();
+
+                                        if !self.log_filters[i] {
+                                            ui.vertical_centered(|ui| {
+                                                ui.label("Disabled");
+                                            });
+                                        } else {
+                                            egui::ScrollArea::vertical()
+                                                .id_salt(format!("log_col_{}", i))
+                                                .stick_to_bottom(true)
+                                                .show(ui, |ui: &mut egui::Ui| {
+                                                    ui.set_min_width(col_width);
+                                                    // Only iterate specific buffer
+                                                    for entry in &self.logs[i] {
+                                                         ui.label(
+                                                             egui::RichText::new(&entry.content)
+                                                                 .monospace()
+                                                                 .size(10.0)
+                                                         );
+                                                    }
+                                                });
+                                        }
+                                    }
+                                );
+                                // Draw a separator line between columns (except last)
+                                if i < 3 {
+                                    ui.separator();
                                 }
                             }
                         });

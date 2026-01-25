@@ -42,10 +42,14 @@ pub struct Midi {
     pub intended_dir: CrossfadeState,
     pub last_applied_dir: CrossfadeState,
     pub device_fader_values: std::collections::HashMap<(String, usize), f32>,
+    pub log_sender: tokio::sync::mpsc::Sender<crate::LogEntry>,
 }
 
 impl Midi {
-    pub fn new(osc_client: OscClient) -> Self {
+    pub fn new(
+        osc_client: OscClient,
+        log_sender: tokio::sync::mpsc::Sender<crate::LogEntry>,
+    ) -> Self {
         // Initialize with empty names
         let fader_names = vec![String::new(); 128];
         let fader_levels = [0.0; 128];
@@ -72,6 +76,7 @@ impl Midi {
             intended_dir: CrossfadeState::Inactive,
             last_applied_dir: CrossfadeState::Inactive,
             device_fader_values: std::collections::HashMap::new(),
+            log_sender,
         }
     }
 
