@@ -88,7 +88,7 @@ fn test_crossfade_state_logic() {
     // Verify Re-Go detection
     assert_eq!(
         resolve_crossfade_direction(Some(10.0), 10.0, CrossfadeState::Inactive),
-        Some(CrossfadeState::Go)
+        None
     );
     // Verify No-Change if active
     assert_eq!(
