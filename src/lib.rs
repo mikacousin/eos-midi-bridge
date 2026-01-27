@@ -103,6 +103,21 @@ pub fn parse_cue_number(text: &str) -> Option<f32> {
         .and_then(|s| s.parse::<f32>().ok())
 }
 
+pub fn parse_cue_progress(text: &str) -> Option<f32> {
+    // Expected format: "... 75%" or "... 100%"
+    // Text ends with '%' usually.
+    // Let's split by whitespace, take the last element, remove '%', parse as f32, div by 100.
+    if let Some(last) = text.split_whitespace().last() {
+        if last.ends_with('%') {
+            let num_str = &last[..last.len() - 1]; // remove %
+            if let Ok(pct) = num_str.parse::<f32>() {
+                return Some(pct / 100.0);
+            }
+        }
+    }
+    None
+}
+
 // Actually, looking at the original code in osc.rs:276:
 // if current_state == Inactive { intended = Go } else { /* do nothing to intended */ }
 // So if we return Option<CrossfadeState>, we can signify "change" vs "no change".
@@ -117,7 +132,10 @@ pub fn resolve_crossfade_direction(
         } else if new_cue < old_cue {
             Some(CrossfadeState::GoBack)
         } else if current_state == CrossfadeState::Inactive {
-            Some(CrossfadeState::Go)
+            // Was: Some(CrossfadeState::Go)
+            // Changing to None to prevent false 'Go' detection when EOS re-broadcasts active cue
+            // during a GoBack or other transitions.
+            None
         } else {
             None
         }

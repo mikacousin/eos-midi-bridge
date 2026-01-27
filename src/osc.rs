@@ -273,48 +273,7 @@ impl OscServer {
             }
 
             // INDEPENDENT CHECK: Cue Events (Update State even if mapped)
-            if msg.addr == "/eos/out/event/cue/1/0/stop" {
-                let mut m = midi.lock().unwrap();
-                if m.crossfade_state == CrossfadeState::Go
-                    || m.crossfade_state == CrossfadeState::GoBack
-                {
-                    m.crossfade_state = CrossfadeState::Pause;
-                    let profiles_to_process: Vec<(String, crate::controller::ControllerProfile)> =
-                        m.device_profiles
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                    for (d_name, p) in profiles_to_process {
-                        if let Some((note, chan, _)) =
-                            p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
-                        {
-                            m.enqueue(&d_name, vec![0x90 | chan, note, 127]);
-                        }
-                    }
-                }
-            } else if msg.addr == "/eos/out/event/cue/1/0/resume" {
-                let mut m = midi.lock().unwrap();
-                if m.crossfade_state == CrossfadeState::Pause {
-                    m.crossfade_state = CrossfadeState::Go;
-                    let profiles_to_process: Vec<(String, crate::controller::ControllerProfile)> =
-                        m.device_profiles
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                    for (d_name, p) in profiles_to_process {
-                        if let Some((s_note, s_chan, _)) =
-                            p.get_midi_output_for_action(crate::controller::LogicalAction::Stop)
-                        {
-                            m.enqueue(&d_name, vec![0x90 | s_chan, s_note, 0]);
-                        }
-                        if let Some((g_note, g_chan, _)) =
-                            p.get_midi_output_for_action(crate::controller::LogicalAction::Go)
-                        {
-                            m.enqueue(&d_name, vec![0x90 | g_chan, g_note, 127]);
-                        }
-                    }
-                }
-            } else if msg.addr == "/eos/out/active/cue/text" {
+            if msg.addr == "/eos/out/active/cue/text" {
                 if let Some(OscType::String(text)) = msg.args.first() {
                     // Extract the cue number part
                     if let Some(new_cue_num) = crate::parse_cue_number(text) {
@@ -327,10 +286,32 @@ impl OscServer {
                             new_cue_num,
                             current_state,
                         ) {
-                            m.intended_dir = direction;
+                            m.intended_dir = Some(direction);
+
+                            // IMMEDIATE TRIGGER CHECK
+                            // If the text contains progress (e.g. "7%"), we should try to apply state NOW
+                            // because the float packet might have been lost or arrived earlier (when dir was None).
+                            if let Some(p) = crate::parse_cue_progress(text) {
+                                if p < 1.0 {
+                                    let last = m.last_applied_dir;
+                                    let current = m.crossfade_state;
+
+                                    if direction != last {
+                                        m.set_crossfade_state(direction, false);
+                                        m.last_applied_dir = direction;
+                                    } else if current == CrossfadeState::Inactive {
+                                        m.set_crossfade_state(direction, false);
+                                        m.last_applied_dir = direction;
+                                    }
+                                }
+                            }
+                        } else {
+                            // no log
                         }
 
                         m.current_cue = Some(new_cue_num);
+                    } else {
+                        // no log
                     }
                 }
             } else if msg.addr == "/eos/out/ping" {
@@ -380,22 +361,24 @@ impl OscServer {
 
                 if *progress < 1.0 {
                     // Activate the intended direction if we are not already in it (or if overriding something other than Pause)
-                    let intended = m.intended_dir;
-                    let last = m.last_applied_dir;
-                    let current = m.crossfade_state;
+                    if let Some(intended) = m.intended_dir {
+                        let last = m.last_applied_dir;
+                        let current = m.crossfade_state;
 
-                    // Only apply change if direction is new OR if we are Inactive
-                    // Respect Pause: If Paused, do not switch unless the intended direction actually changed (e.g. Go -> Back)
-                    if intended != last {
-                        m.set_crossfade_state(intended, false);
-                        m.last_applied_dir = intended;
-                    } else if current == CrossfadeState::Inactive {
-                        // Starting a fade from Inactive
-                        m.set_crossfade_state(intended, false);
-                        m.last_applied_dir = intended;
+                        // Only apply change if direction is new OR if we are Inactive
+                        // Respect Pause: If Paused, do not switch unless the intended direction actually changed (e.g. Go -> Back)
+                        if intended != last {
+                            m.set_crossfade_state(intended, false);
+                            m.last_applied_dir = intended;
+                        } else if current == CrossfadeState::Inactive {
+                            // Starting a fade from Inactive
+                            m.set_crossfade_state(intended, false);
+                            m.last_applied_dir = intended;
+                        }
                     }
                 } else {
                     m.set_crossfade_state(CrossfadeState::Inactive, false);
+                    m.intended_dir = None;
                 }
             }
         }
