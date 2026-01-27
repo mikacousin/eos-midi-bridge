@@ -323,8 +323,6 @@ impl Midi {
         if self.crossfade_state == crate::CrossfadeState::Pause {
             self.blink_state = !self.blink_state;
 
-
-
             let _v = if self.blink_state { 127 } else { 0 };
             // Need to find which device(s) have this mapping?
             // set_crossfade_state handles the finding.
@@ -710,17 +708,21 @@ pub async fn execute_mapping(
     for (out_idx, output) in mapping.outputs.iter().enumerate() {
         match output {
             crate::controller::Output::Osc { addr, arg_type } => {
+                // Skip generic OSC processing for Page actions as they are handled manually with specific timing
+                if matches!(
+                    mapping.action,
+                    crate::controller::LogicalAction::FaderPageUp
+                        | crate::controller::LogicalAction::FaderPageDown
+                ) {
+                    continue;
+                }
+
                 let client_clone = client.clone();
                 let mut final_addr = addr.clone();
 
                 // Perform dynamic replacement
                 if final_addr.contains("{page}") {
-                    let page_str = if current_page <= 1 {
-                        String::new()
-                    } else {
-                        (current_page - 1).to_string()
-                    };
-                    final_addr = final_addr.replace("{page}", &page_str);
+                    final_addr = final_addr.replace("{page}", &current_page.to_string());
                 }
                 if final_addr.contains("{bank_size}") {
                     final_addr = final_addr.replace("{bank_size}", &bank_size.to_string());
