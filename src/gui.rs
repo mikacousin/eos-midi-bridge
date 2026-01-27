@@ -36,6 +36,8 @@ pub struct BridgeApp {
     log_filters: [bool; 4], // MidiIn, MidiOut, OscIn, OscOut
 }
 
+/// Maps a linear index (from the controller profile mappings) to the visual Node IDs in the graph.
+/// This allows O(1) lookup when we receive a MIDI event referencing `mapping_idx`.
 pub struct MappingNodeIds {
     pub trigger: egui_snarl::NodeId,
     pub action: egui_snarl::NodeId,
@@ -207,6 +209,9 @@ impl eframe::App for BridgeApp {
 }
 
 impl BridgeApp {
+    /// Rebuilds the entire node graph from the provided ControllerProfile.
+    /// This converts the linear list of mappings (Trigger -> Action -> Outputs) into a visual
+    /// flow-chart representation, deduplicating Actions and grouping Triggers/Outputs around them.
     fn populate_snarl(&mut self, profile: &eos_midi_bridge::controller::ControllerProfile) {
         use eos_midi_bridge::controller::LogicalAction;
         use eos_midi_bridge::nodes::NodeData;

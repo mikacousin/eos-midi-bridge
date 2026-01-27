@@ -1,12 +1,4 @@
 use crate::{CrossfadeState, MackieEvent, Queue, osc::OscClient, strip_accents};
-// Used in struct definitions but seemingly unused?
-// Actually if we look at line 16, it IS used.
-// Why did rustc complain?
-// "warning: unused import: `midir::MidiOutputConnection`"
-// "note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default"
-// Maybe it's because I'm using `midir::MidiOutputConnection` fully qualified in the struct, so I don't need the import?
-// Yes.
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time;
@@ -23,10 +15,8 @@ pub struct Midi {
     pub device_connections: std::collections::HashMap<String, midir::MidiOutputConnection>,
     // Removed old connections vec, now mapping output connections by device name
 
-    // State maps keyed by [DeviceName] usually not needed if state is global,
-    // BUT fader levels might differ if profiles map them differently.
-    // For now, we keep Global State for the "EOS Model" side (what EOS tells us),
-    // and we translate that to each device.
+    // Global State for the "EOS Model" (single source of truth for all controllers)
+    // We translate this global state to each device's specific protocol via their profiles.
 
     // EOS State
     pub fader_levels: [f32; 128], // Stores up to 128 faders (enough for huge banks)
@@ -333,7 +323,7 @@ impl Midi {
         if self.crossfade_state == crate::CrossfadeState::Pause {
             self.blink_state = !self.blink_state;
 
-            // let go_fb = self.profile... REMOVED, doing manual iteration below
+
 
             let _v = if self.blink_state { 127 } else { 0 };
             // Need to find which device(s) have this mapping?
