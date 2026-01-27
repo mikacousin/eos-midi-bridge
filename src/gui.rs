@@ -71,11 +71,11 @@ impl BridgeApp {
         };
 
         // Pre-populate the node graph with the current profile
-        if let Ok(m) = midi.lock() {
-            if let Some((name, p)) = m.device_profiles.iter().next() {
-                app.selected_controller_for_graph = Some(name.clone());
-                app.populate_snarl(p);
-            }
+        if let Ok(m) = midi.lock()
+            && let Some((name, p)) = m.device_profiles.iter().next()
+        {
+            app.selected_controller_for_graph = Some(name.clone());
+            app.populate_snarl(p);
         }
 
         app
@@ -631,11 +631,9 @@ impl eframe::App for BridgeApp {
                             ui.separator();
                             if ui.button("🔄 Refresh").clicked()
                                 && let Ok(m) = self.midi.lock()
-                            {
-                                if let Some(name) = &self.selected_controller_for_graph
-                                   && let Some(p) = m.device_profiles.get(name) {
+                                && let Some(name) = &self.selected_controller_for_graph
+                                && let Some(p) = m.device_profiles.get(name) {
                                      populate_needed = Some(p.clone());
-                                }
                             }
                             ui.separator();
                             ui.label("Ctrl + Scroll to zoom, Drag to pan");

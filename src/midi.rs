@@ -93,10 +93,10 @@ impl Midi {
         let mut logs = Vec::new();
         // Iterate over all devices and check their profiles
         for (device_name, profile) in &self.device_profiles {
-            if let Some(ex) = exclude_device {
-                if device_name == ex {
-                    continue;
-                }
+            if let Some(ex) = exclude_device
+                && device_name == ex
+            {
+                continue;
             }
             // Find mappings for FaderMove { index }
             for (map_idx, mapping) in profile.mappings.iter().enumerate() {
@@ -162,10 +162,10 @@ impl Midi {
 
         for (device_name, profile) in &self.device_profiles {
             // Check if this strip (0-indexed) corresponds to a Visible Fader (1-indexed)
-            if let Some(visible) = &profile.display.visible_faders {
-                if !visible.contains(&(strip + 1)) {
-                    continue;
-                }
+            if let Some(visible) = &profile.display.visible_faders
+                && !visible.contains(&(strip + 1))
+            {
+                continue;
             }
 
             if line as usize >= profile.display.line_offsets.len() {
@@ -223,10 +223,10 @@ impl Midi {
             let len = profile.display.line_length;
             for line in 0..profile.display.line_offsets.len() {
                 // Inline send_lcd
-                if line as usize >= profile.display.line_offsets.len() {
+                if line >= profile.display.line_offsets.len() {
                     continue;
                 }
-                let start = profile.display.line_offsets[line as usize];
+                let start = profile.display.line_offsets[line];
                 let mut data = vec![0xF0];
                 data.extend(&profile.display.sysex_prefix);
                 data.push(start);
@@ -242,7 +242,7 @@ impl Midi {
                     for output in &mapping.outputs {
                         if let crate::controller::Output::MidiPitchwheel { channel } = output {
                             // -8192
-                            let val = 0 as u16;
+                            let val = 0_u16;
                             let mut data = vec![0xE0 | channel];
                             data.push((val & 0x7F) as u8);
                             data.push(((val >> 7) & 0x7F) as u8);
@@ -687,11 +687,7 @@ pub async fn execute_mapping(
                     } else {
                         // No history: Block until we establish crossover context?
                         // Or Check proximity?
-                        if (final_v - eos_val).abs() < 0.1 {
-                            true
-                        } else {
-                            false
-                        }
+                        (final_v - eos_val).abs() < 0.1
                     }
                 } else {
                     true
@@ -745,13 +741,7 @@ pub async fn execute_mapping(
                 // For Faders, we need the value
                 let arg = if let crate::controller::LogicalAction::FaderMove { .. } = mapping.action
                 {
-                    if let Some(val) = cached_fader_value {
-                        Some(rosc::OscType::Float(val))
-                    } else {
-                        // If no cached value, it means the update was blocked by pickup logic or didn't run.
-                        // In either case, we should NOT send an OSC update.
-                        None
-                    }
+                    cached_fader_value.map(rosc::OscType::Float)
                 } else {
                     None
                 };

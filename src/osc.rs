@@ -291,18 +291,15 @@ impl OscServer {
                             // IMMEDIATE TRIGGER CHECK
                             // If the text contains progress (e.g. "7%"), we should try to apply state NOW
                             // because the float packet might have been lost or arrived earlier (when dir was None).
-                            if let Some(p) = crate::parse_cue_progress(text) {
-                                if p < 1.0 {
-                                    let last = m.last_applied_dir;
-                                    let current = m.crossfade_state;
+                            if let Some(p) = crate::parse_cue_progress(text)
+                                && p < 1.0
+                            {
+                                let last = m.last_applied_dir;
+                                let current = m.crossfade_state;
 
-                                    if direction != last {
-                                        m.set_crossfade_state(direction, false);
-                                        m.last_applied_dir = direction;
-                                    } else if current == CrossfadeState::Inactive {
-                                        m.set_crossfade_state(direction, false);
-                                        m.last_applied_dir = direction;
-                                    }
+                                if direction != last || current == CrossfadeState::Inactive {
+                                    m.set_crossfade_state(direction, false);
+                                    m.last_applied_dir = direction;
                                 }
                             }
                         } else {

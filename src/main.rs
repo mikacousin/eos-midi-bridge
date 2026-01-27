@@ -442,11 +442,11 @@ fn setup_midi_devices(
                     info!("Connected Output: {}", device_name);
 
                     // Send startup messages
-                    if let Ok(m) = midi_state.lock() {
-                        if let Some(profile) = m.device_profiles.get(device_name) {
-                            for msg in &profile.startup_messages {
-                                let _ = conn.send(msg);
-                            }
+                    if let Ok(m) = midi_state.lock()
+                        && let Some(profile) = m.device_profiles.get(device_name)
+                    {
+                        for msg in &profile.startup_messages {
+                            let _ = conn.send(msg);
                         }
                     }
 

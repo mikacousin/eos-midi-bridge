@@ -107,13 +107,11 @@ pub fn parse_cue_progress(text: &str) -> Option<f32> {
     // Expected format: "... 75%" or "... 100%"
     // Text ends with '%' usually.
     // Let's split by whitespace, take the last element, remove '%', parse as f32, div by 100.
-    if let Some(last) = text.split_whitespace().last() {
-        if last.ends_with('%') {
-            let num_str = &last[..last.len() - 1]; // remove %
-            if let Ok(pct) = num_str.parse::<f32>() {
-                return Some(pct / 100.0);
-            }
-        }
+    if let Some(last) = text.split_whitespace().last()
+        && let Some(num_str) = last.strip_suffix('%')
+        && let Ok(pct) = num_str.parse::<f32>()
+    {
+        return Some(pct / 100.0);
     }
     None
 }
