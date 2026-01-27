@@ -53,7 +53,7 @@ _Other MIDI controllers can be supported by creating custom JSON profiles in the
 ## 🛠️ Installation
 
 ### Download
-Grab the latest binary for your OS from the [Releases](https://github.com/YOUR_USERNAME/eos-midi-bridge/releases) tab.
+Grab the latest binary for your OS from the [Releases](https://github.com/mikacousin/eos-midi-bridge/releases) tab.
 
 ### Manual Build
 ```bash
