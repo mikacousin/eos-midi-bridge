@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background Gradient: Deep Space / Stage Dark -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0f0f1a;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Beam Gradient: Gold Energy -->
+    <linearGradient id="beamGrad" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" style="stop-color:#ffd700;stop-opacity:0.6" />
+      <stop offset="100%" style="stop-color:#ffd700;stop-opacity:0" />
+    </linearGradient>
+    
+    <!-- Light Source Glow -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Metallic Rim Gradient: Lighter Blue Variant -->
+    <linearGradient id="metalGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" style="stop-color:#3a5085;stop-opacity:1" />
+        <stop offset="50%" style="stop-color:#90b4ff;stop-opacity:1" />
+        <stop offset="100%" style="stop-color:#3a5085;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- App Icon Base Shape -->
+  <rect x="20" y="20" width="472" height="472" rx="100" ry="100" fill="url(#bgGrad)" stroke="#333" stroke-width="2" />
+
+  <!-- Central Composition Group -->
+  <!-- Centered at 256, 256 -->
+  <g transform="translate(256, 256)">
+    
+    <!-- Outer Rim (Full Circle) -->
+    <circle cx="0" cy="0" r="140" fill="none" stroke="url(#metalGrad)" stroke-width="12" filter="url(#glow)" />
+    <!-- Inner dark fill -->
+    <circle cx="0" cy="0" r="134" fill="#000" opacity="0.4" stroke="none" />
+    
+    <!-- Pins Layout: Standard DIN 5-pin 180 degree -->
+    <!-- Pins are arranged on a circle of radius R=85 -->
+    <!-- Angles: 0(R), 45, 90(Bottom), 135, 180(L) -->
+    <!-- Note: SVG Y is down. 
+         0 deg = Right = (R, 0)
+         90 deg = Down = (0, R)
+         180 deg = Left = (-R, 0)
+    -->
+    
+    <!-- Beams of Light (Radiating OUT from center, behind pins) -->
+    <!-- Beam 2 (Bottom) -->
+    <path d="M-15,85 L-50,380 L50,380 L15,85 Z" fill="url(#beamGrad)" opacity="0.4" transform="rotate(0)" />
+    <!-- Beam 4 (Bottom Right) -->
+    <path d="M-15,85 L-50,380 L50,380 L15,85 Z" fill="url(#beamGrad)" opacity="0.3" transform="rotate(-45)" />
+    <!-- Beam 5 (Bottom Left) -->
+    <path d="M-15,85 L-50,380 L50,380 L15,85 Z" fill="url(#beamGrad)" opacity="0.3" transform="rotate(45)" />
+    <!-- Beam 1 (Right, Diagonal Up-Right) -->
+    <path d="M-15,0 L-60,-280 L60,-280 L15,0 Z" fill="url(#beamGrad)" opacity="0.4" transform="translate(85, 0) rotate(45)" />
+    <!-- Beam 3 (Left, Diagonal Up-Left) -->
+    <path d="M-15,0 L-60,-280 L60,-280 L15,0 Z" fill="url(#beamGrad)" opacity="0.4" transform="translate(-85, 0) rotate(-45)" />
+
+    <!-- Actual Pins -->
+    <!-- Pin 2 (Bottom Center) -->
+    <circle cx="0" cy="85" r="18" fill="#ffd700" filter="url(#glow)" />
+    
+    <!-- Pin 4 (Right Inner, 45 deg) -->
+    <!-- x = 85 * cos(45) = 60.1 -->
+    <!-- y = 85 * sin(45) = 60.1 -->
+    <circle cx="60.1" cy="60.1" r="18" fill="#ffd700" filter="url(#glow)" />
+    
+    <!-- Pin 5 (Left Inner, 135 deg) -->
+    <!-- x = -60.1, y = 60.1 -->
+    <circle cx="-60.1" cy="60.1" r="18" fill="#ffd700" filter="url(#glow)" />
+    
+    <!-- Pin 1 (Right Outer, 0 deg) -->
+    <circle cx="85" cy="0" r="18" fill="#ffa500" filter="url(#glow)" />
+
+    <!-- Pin 3 (Left Outer, 180 deg) -->
+    <circle cx="-85" cy="0" r="18" fill="#ffa500" filter="url(#glow)" />
+    
+    <!-- Notch / Keyway (Optional but adds realism) -->
+    <!-- Usually at top center for this orientation? -->
+    <rect x="-10" y="-140" width="20" height="20" fill="#3a5085" filter="url(#glow)" />
+
+  </g>
+  
+</svg>

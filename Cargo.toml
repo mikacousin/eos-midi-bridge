@@ -19,3 +19,6 @@ eframe = "0.33"
 egui = "0.33"
 egui-file-dialog = "0.12"
 egui-snarl = "0.9"
+
+[build-dependencies]
+winres = "0.1"
