@@ -1,20 +1,23 @@
-# Eos MIDI-OSC Bridge (iCon Platform M+)
+# Eos MIDI-OSC Bridge
 
 > [!NOTE]
 > This project is in its early stages and was created with Google Antigravity.
 
-A high-performance, asynchronous bridge connecting the **iCon Platform M+** (with D2 Display) to **ETC Eos Family** lighting consoles. Built in Rust for ultra-low latency and reliability.
+A high-performance, asynchronous bridge connecting the **MIDI controllers** to **ETC Eos Family** lighting consoles. Built in Rust for ultra-low latency and reliability.
 
 ## ✨ Key Features
 - **Live Reconfiguration**: Change Eos IP, ports, or MIDI devices on the fly. No application restart required.
 - **Multi-Controller Support**: Simultaneously use multiple supported controllers.
-- **Auto-Hardware Detection**: Real-time monitoring of MIDI connections. Plug your iCon while the app is running, it will be detected instantly.
-- **Bi-directional Motorized Feedback**: Faders move on your iCon when they move in Eos.
-- **D2 Display Support**: Automatically pushes Eos fader labels (e.g., "Front Light", "Haze") to the iCon scribble strips.
+- **Auto-Hardware Detection**: Real-time monitoring of MIDI connections. Plug your MIDI controller while the app is running, it will be detected instantly.
+- **Bi-directional Motorized Feedback**: Faders move on your MIDI controller when they move in Eos.
+- **Display Support**: Automatically pushes Eos fader labels (e.g., "Front Light", "Haze") to the MIDI scribble strips.
 - **Fader Touch Sensitivity**: Mutes feedback while you are touching a fader to prevent "motor fighting."
 - **Visual Feedback**: Built-in GUI shows active cue, fader levels, and real-time connection status.
-- **Page Navigation**: Bank `<` `>` buttons on the iCon move the Eos fader page and refresh all labels.
+- **Page Navigation**: Bank `<` `>` buttons on the MIDI controller move the Eos fader page and refresh all labels.
 - **Cross-Platform**: Optimized for Windows, macOS, and Linux.
+
+> ⚠️ The macOS version has not been tested due to lack of hardware.  
+> Feedback and contributions from the community are welcome.
 
 ---
 
