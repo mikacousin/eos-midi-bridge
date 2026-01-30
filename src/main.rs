@@ -58,11 +58,21 @@ fn main() -> anyhow::Result<()> {
     // Supervision Loop
     spawn_supervision_loop(&rt, midi.clone(), tx_midi, rx_system, cfg.clone());
 
+    // Load Icon
+    let icon = match load_icon() {
+        Ok(i) => Some(i),
+        Err(e) => {
+            warn!("Failed to load app icon: {}", e);
+            None
+        }
+    };
+
     // Launch the GUI
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([840.0, 510.0])
-            .with_maximized(true),
+            .with_maximized(true)
+            .with_icon(icon.unwrap_or_default()), // Handle optional efficiently
         ..Default::default()
     };
     let app_midi = midi.clone();
@@ -524,4 +534,17 @@ fn connect_device_output(midi_state: Arc<Mutex<Midi>>, device_name: &str) {
     } else {
         warn!("MIDI Output device '{}' not found", device_name);
     }
+}
+
+fn load_icon() -> anyhow::Result<egui::IconData> {
+    let icon_bytes = include_bytes!("../assets/icon.png");
+    let image = image::load_from_memory(icon_bytes)
+        .context("Failed to decode icon PNG")?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    Ok(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
 }
